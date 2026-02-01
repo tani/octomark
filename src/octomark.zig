@@ -36,9 +36,24 @@ pub const OctomarkOptions = struct {
     enable_html: bool = false,
 };
 
+const is_special_char = blk: {
+    var s: [256]bool = [_]bool{false} ** 256;
+    const special = "\\['*`&<>\"'_~!$h";
+    for (special) |ch| s[ch] = true;
+    break :blk s;
+};
+
+const html_escape_map = blk: {
+    var map: [256]?[]const u8 = [_]?[]const u8{null} ** 256;
+    map['&'] = "&amp;";
+    map['<'] = "&lt;";
+    map['>'] = "&gt;";
+    map['\"'] = "&quot;";
+    map['\''] = "&#39;";
+    break :blk map;
+};
+
 pub const OctomarkParser = struct {
-    is_special_char: [256]bool = [_]bool{false} ** 256,
-    html_escape_map: [256]?[]const u8 = [_]?[]const u8{null} ** 256,
     table_alignments: [64]TableAlignment = [_]TableAlignment{TableAlignment.none} ** 64,
     table_column_count: usize = 0,
     block_stack: [MAX_BLOCK_NESTING]BlockEntry = undefined,
@@ -52,13 +67,6 @@ pub const OctomarkParser = struct {
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
         self.* = OctomarkParser{ .allocator = allocator };
-        const special = "\\['*`&<>\"'_~!$h";
-        for (special) |ch| self.is_special_char[ch] = true;
-        self.html_escape_map['&'] = "&amp;";
-        self.html_escape_map['<'] = "&lt;";
-        self.html_escape_map['>'] = "&gt;";
-        self.html_escape_map['\"'] = "&quot;";
-        self.html_escape_map['\''] = "&#39;";
         self.pending_buffer = .{};
         try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
         self.table_header_storage = .{};
@@ -184,9 +192,10 @@ pub const OctomarkParser = struct {
     }
 
     fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: anytype) !void {
+        _ = parser;
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
-            const entity = parser.html_escape_map[text[i]];
+            const entity = html_escape_map[text[i]];
             if (entity) |value| {
                 try output.writeAll(value);
             } else {
@@ -205,21 +214,21 @@ pub const OctomarkParser = struct {
         while (i < length) {
             const start = i;
             while (i + 7 < length) {
-                if (parser.is_special_char[text[i]] or
-                    parser.is_special_char[text[i + 1]] or
-                    parser.is_special_char[text[i + 2]] or
-                    parser.is_special_char[text[i + 3]] or
-                    parser.is_special_char[text[i + 4]] or
-                    parser.is_special_char[text[i + 5]] or
-                    parser.is_special_char[text[i + 6]] or
-                    parser.is_special_char[text[i + 7]])
+                if (is_special_char[text[i]] or
+                    is_special_char[text[i + 1]] or
+                    is_special_char[text[i + 2]] or
+                    is_special_char[text[i + 3]] or
+                    is_special_char[text[i + 4]] or
+                    is_special_char[text[i + 5]] or
+                    is_special_char[text[i + 6]] or
+                    is_special_char[text[i + 7]])
                 {
                     break;
                 }
                 i += 8;
             }
 
-            while (i < length and !parser.is_special_char[text[i]]) : (i += 1) {}
+            while (i < length and !is_special_char[text[i]]) : (i += 1) {}
 
             if (i > start) try output.writeAll(text[start..i]);
             if (i >= length) break;
@@ -401,7 +410,7 @@ pub const OctomarkParser = struct {
             }
 
             if (!handled) {
-                const entity = parser.html_escape_map[text[i]];
+                const entity = html_escape_map[text[i]];
                 if (entity) |value| {
                     try output.writeAll(value);
                 } else {
@@ -605,13 +614,13 @@ pub const OctomarkParser = struct {
             }
         }
 
-        // 2. Optimization: Quick check for pipe in potential header
-        // Optimization: Quick check for pipe using optimized search
-        const has_pipe = (std.mem.indexOfScalar(u8, line_content, '|') != null);
+        // 2. Strict New Table Check: Must start with '|'
+        const trimmed_start = std.mem.trimLeft(u8, line_content, " \t");
+        if (trimmed_start.len == 0 or trimmed_start[0] != '|') return false;
 
         // 3. If NOT pending header, perform lookahead to decide if we should start pending
         if (!parser.table_header_pending) {
-            if (!has_pipe) return false;
+            // has_pipe is implicitly true if we are here (from dispatch + strict check)
 
             // Lookahead: Check if the NEXT line is a separator to avoid unnecessary buffering.
             if (isNextLineTableSeparator(full_data, current_pos)) {
@@ -799,11 +808,21 @@ pub const OctomarkParser = struct {
         const is_dl = try parser.parseDefinitionList(&line_content, leading_spaces, output);
         const is_list = try parser.parseListItem(&line_content, leading_spaces, output);
 
-        if (try parser.parseFencedCodeBlock(line_content, output)) return false;
-        if (try parser.parseMathBlock(line_content, output)) return false;
-        if (try parser.parseHeader(line_content, output)) return false;
-        if (try parser.parseHorizontalRule(line_content, output)) return false;
-        if (try parser.parseTable(line_content, full_data, current_pos, output)) return false;
+        const trimmed_for_dispatch = std.mem.trimLeft(u8, line_content, " \t");
+        if (trimmed_for_dispatch.len > 0) {
+            switch (trimmed_for_dispatch[0]) {
+                '#' => if (try parser.parseHeader(line_content, output)) return false,
+                '`' => if (try parser.parseFencedCodeBlock(line_content, output)) return false,
+                '~' => if (try parser.parseFencedCodeBlock(line_content, output)) return false,
+                '$' => if (try parser.parseMathBlock(line_content, output)) return false,
+                '-' => if (try parser.parseHorizontalRule(line_content, output)) return false,
+                '*' => if (try parser.parseHorizontalRule(line_content, output)) return false,
+                '_' => if (try parser.parseHorizontalRule(line_content, output)) return false,
+                '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return false,
+                else => {},
+            }
+        }
+
         if (try parser.parseDefinitionTerm(line_content, full_data, current_pos, output)) return false;
 
         try parser.processParagraph(line_content, is_dl, is_list, output);
