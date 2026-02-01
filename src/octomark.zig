@@ -28,7 +28,42 @@ const BlockEntry = struct {
 
 const Buffer = std.ArrayListUnmanaged(u8);
 const AllocError = std.mem.Allocator.Error;
-const ParseError = AllocError || std.Io.Writer.Error;
+const ParseError = AllocError || std.fs.File.WriteError;
+
+const FastWriter = struct {
+    file: std.fs.File,
+    buffer: []u8,
+    index: usize,
+
+    fn init(file: std.fs.File, buffer: []u8) FastWriter {
+        return .{ .file = file, .buffer = buffer, .index = 0 };
+    }
+
+    fn writeAll(self: *FastWriter, data: []const u8) std.fs.File.WriteError!void {
+        if (data.len == 0) return;
+        if (data.len >= self.buffer.len) {
+            try self.flush();
+            try self.file.writeAll(data);
+            return;
+        }
+        const available = self.buffer.len - self.index;
+        if (data.len > available) try self.flush();
+        std.mem.copyForwards(u8, self.buffer[self.index .. self.index + data.len], data);
+        self.index += data.len;
+    }
+
+    fn writeByte(self: *FastWriter, byte: u8) std.fs.File.WriteError!void {
+        if (self.index == self.buffer.len) try self.flush();
+        self.buffer[self.index] = byte;
+        self.index += 1;
+    }
+
+    fn flush(self: *FastWriter) std.fs.File.WriteError!void {
+        if (self.index == 0) return;
+        try self.file.writeAll(self.buffer[0..self.index]);
+        self.index = 0;
+    }
+};
 
 
 const OctomarkParser = struct {
@@ -146,7 +181,7 @@ fn currentBlockType(parser: *const OctomarkParser) ?BlockType {
     return parser.block_stack[parser.stack_depth - 1].block_type;
 }
 
-fn renderAndCloseTopBlock(parser: *OctomarkParser, output: *std.Io.Writer) ParseError!void {
+fn renderAndCloseTopBlock(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
     if (parser.stack_depth == 0) return;
     const block_type = parser.block_stack[parser.stack_depth - 1].block_type;
     popBlock(parser);
@@ -163,11 +198,11 @@ fn renderAndCloseTopBlock(parser: *OctomarkParser, output: *std.Io.Writer) Parse
     }
 }
 
-fn closeParagraphIfOpen(parser: *OctomarkParser, output: *std.Io.Writer) ParseError!void {
+fn closeParagraphIfOpen(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
     if (currentBlockType(parser) == .paragraph) try renderAndCloseTopBlock(parser, output);
 }
 
-fn closeLeafBlocks(parser: *OctomarkParser, output: *std.Io.Writer) ParseError!void {
+fn closeLeafBlocks(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
     const block_value = currentBlockTypeValue(parser);
     if (block_value == @intFromEnum(BlockType.paragraph) or
         block_value == @intFromEnum(BlockType.table) or
@@ -178,7 +213,7 @@ fn closeLeafBlocks(parser: *OctomarkParser, output: *std.Io.Writer) ParseError!v
     }
 }
 
-fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: *std.Io.Writer) ParseError!void {
+fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: *FastWriter) ParseError!void {
     var i: usize = 0;
     while (i < text.len) : (i += 1) {
         const entity = parser.html_escape_map[text[i]];
@@ -190,7 +225,7 @@ fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: *s
     }
 }
 
-fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *std.Io.Writer) ParseError!void {
+fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *FastWriter) ParseError!void {
     const length = text.len;
     var i: usize = 0;
     while (i < length) {
@@ -393,7 +428,7 @@ fn isBlockStartMarker(str: []const u8) bool {
     return false;
 }
 
-fn processLeafBlockContinuation(parser: *OctomarkParser, line: []const u8, output: *std.Io.Writer) ParseError!bool {
+fn processLeafBlockContinuation(parser: *OctomarkParser, line: []const u8, output: *FastWriter) ParseError!bool {
     const top = currentBlockType(parser);
     if (top != .code and top != .math) return false;
 
@@ -417,7 +452,7 @@ fn processLeafBlockContinuation(parser: *OctomarkParser, line: []const u8, outpu
     return true;
 }
 
-fn tryParseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, output: *std.Io.Writer) ParseError!bool {
+fn tryParseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, output: *FastWriter) ParseError!bool {
     if (line_content.len >= 3 and std.mem.eql(u8, line_content[0..3], "```")) {
         try closeLeafBlocks(parser, output);
         try output.writeAll("<pre><code");
@@ -435,7 +470,7 @@ fn tryParseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, ou
     return false;
 }
 
-fn tryParseMathBlock(parser: *OctomarkParser, line_content: []const u8, output: *std.Io.Writer) ParseError!bool {
+fn tryParseMathBlock(parser: *OctomarkParser, line_content: []const u8, output: *FastWriter) ParseError!bool {
     if (line_content.len >= 2 and std.mem.eql(u8, line_content[0..2], "$$")) {
         try closeLeafBlocks(parser, output);
         try output.writeAll("<div class=\"math\">\n");
@@ -445,7 +480,7 @@ fn tryParseMathBlock(parser: *OctomarkParser, line_content: []const u8, output: 
     return false;
 }
 
-fn tryParseHeader(parser: *OctomarkParser, line_content: []const u8, output: *std.Io.Writer) ParseError!bool {
+fn tryParseHeader(parser: *OctomarkParser, line_content: []const u8, output: *FastWriter) ParseError!bool {
     if (line_content.len >= 2 and line_content[0] == '#') {
         var level: usize = 0;
         while (level < 6 and level < line_content.len and line_content[level] == '#') : (level += 1) {}
@@ -466,7 +501,7 @@ fn tryParseHeader(parser: *OctomarkParser, line_content: []const u8, output: *st
     return false;
 }
 
-fn tryParseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: *std.Io.Writer) ParseError!bool {
+fn tryParseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: *FastWriter) ParseError!bool {
     if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
         try closeLeafBlocks(parser, output);
         try output.writeAll("<hr>\n");
@@ -475,7 +510,7 @@ fn tryParseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, out
     return false;
 }
 
-fn tryParseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: *std.Io.Writer) ParseError!bool {
+fn tryParseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: *FastWriter) ParseError!bool {
     var line = line_content.*;
     if (line.len > 0 and line[0] == ':') {
         line = line[1..];
@@ -505,7 +540,7 @@ fn tryParseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, le
     return false;
 }
 
-fn tryParseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: *std.Io.Writer) ParseError!bool {
+fn tryParseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: *FastWriter) ParseError!bool {
     var line = line_content.*;
     var internal_spaces: usize = 0;
     while (internal_spaces < line.len and line[internal_spaces] == ' ') : (internal_spaces += 1) {}
@@ -547,7 +582,7 @@ fn tryParseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_
     return false;
 }
 
-fn tryParseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: *std.Io.Writer) ParseError!bool {
+fn tryParseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: *FastWriter) ParseError!bool {
     if (line_content.len > 0 and line_content[0] == '|') {
         if (currentBlockType(parser) != .table) {
             if (current_pos < full_data.len) {
@@ -639,7 +674,7 @@ fn tryParseTable(parser: *OctomarkParser, line_content: []const u8, full_data: [
     return false;
 }
 
-fn tryParseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: *std.Io.Writer) ParseError!bool {
+fn tryParseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: *FastWriter) ParseError!bool {
     if (current_pos < full_data.len) {
         const next_newline = std.mem.indexOfScalar(u8, full_data[current_pos..], '\n');
         if (next_newline) |offset| {
@@ -662,7 +697,7 @@ fn tryParseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, ful
     return false;
 }
 
-fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bool, is_list: bool, output: *std.Io.Writer) ParseError!void {
+fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bool, is_list: bool, output: *FastWriter) ParseError!void {
     const block_value = currentBlockTypeValue(parser);
     const in_container = (parser.stack_depth > 0 and
         (block_value < @intFromEnum(BlockType.blockquote) or block_value == @intFromEnum(BlockType.definition_description)));
@@ -679,7 +714,7 @@ fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bo
     if (line_break) try output.writeAll("<br>");
 }
 
-fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []const u8, current_pos: usize, output: *std.Io.Writer) ParseError!bool {
+fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []const u8, current_pos: usize, output: *FastWriter) ParseError!bool {
     if (try processLeafBlockContinuation(parser, line, output)) return false;
 
     var leading_spaces: usize = 0;
@@ -743,7 +778,7 @@ fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []con
 pub fn octomarkFeed(
     parser: *OctomarkParser,
     chunk: []const u8,
-    output: *std.Io.Writer,
+    output: *FastWriter,
     allocator: std.mem.Allocator,
 ) ParseError!void {
     try parser.pending_buffer.appendSlice(allocator, chunk);
@@ -773,7 +808,7 @@ pub fn octomarkFeed(
 }
 
 /// Finalizes parsing and closes any open blocks. Returns writer errors.
-pub fn octomarkFinish(parser: *OctomarkParser, output: *std.Io.Writer) ParseError!void {
+pub fn octomarkFinish(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
     if (parser.pending_buffer.items.len > 0) {
         _ = try processSingleLine(
             parser,
@@ -795,17 +830,17 @@ pub fn main() !void {
     const stdin_file = std.fs.File.stdin();
     const stdout_file = std.fs.File.stdout();
     var reader_buffer: [65536]u8 = undefined;
-    var writer_buffer: [65536]u8 = undefined;
     var reader = stdin_file.reader(&reader_buffer);
-    var writer = stdout_file.writer(&writer_buffer);
+    var writer_buffer: [65536]u8 = undefined;
+    var writer = FastWriter.init(stdout_file, &writer_buffer);
     var chunk: [65536]u8 = undefined;
 
     while (true) {
         const n = try reader.interface.readSliceShort(&chunk);
         if (n == 0) break;
-        try octomarkFeed(&parser, chunk[0..n], &writer.interface, allocator);
+        try octomarkFeed(&parser, chunk[0..n], &writer, allocator);
     }
 
-    try octomarkFinish(&parser, &writer.interface);
-    try writer.interface.flush();
+    try octomarkFinish(&parser, &writer);
+    try writer.flush();
 }
