@@ -4,7 +4,7 @@
 #include <time.h>
 
 #define OCTOMARK_NO_MAIN
-#include "octomark.c"
+#include "../src/octomark.c"
 
 int main() {
   printf("--- OctoMark C Performance Benchmark & O(N) Verification ---\n");

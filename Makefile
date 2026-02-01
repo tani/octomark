@@ -5,14 +5,14 @@ CFLAGS ?= -O3 -std=c99
 
 all: octomark
 
-octomark: octomark.c
-	$(CC) $(CFLAGS) octomark.c -o octomark
+octomark: src/octomark.c
+	$(CC) $(CFLAGS) src/octomark.c -o octomark
 
-benchmark: benchmark.c octomark.c
-	$(CC) $(CFLAGS) benchmark.c -o benchmark
+benchmark: benchmark/benchmark.c src/octomark.c
+	$(CC) $(CFLAGS) benchmark/benchmark.c -o benchmark/benchmark
 
-test: test.c octomark.c
-	$(CC) $(CFLAGS) test.c -o test_runner
+test: test/test.c src/octomark.c
+	$(CC) $(CFLAGS) test/test.c -o test/test
 
 clean:
-	rm -f octomark benchmark test_runner
+	rm -f octomark benchmark/benchmark test/test

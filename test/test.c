@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #define OCTOMARK_NO_MAIN
-#include "octomark.c"
+#include "../src/octomark.c"
 
 typedef struct {
   const char *name;

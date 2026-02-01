@@ -24,7 +24,7 @@ streaming throughput.
 
 ```bash
 make benchmark
-./benchmark
+./benchmark/benchmark
 ```
 
 Recent run (EXAMPLE.md on this machine):
@@ -49,7 +49,7 @@ OctoMark supports GFM-like Markdown with extensions:
 Use any C99-compliant compiler with high optimization flags:
 
 ```bash
-gcc -O3 -std=c99 octomark.c -o octomark
+gcc -O3 -std=c99 src/octomark.c -o octomark
 ```
 
 ### Usage as a CLI
@@ -72,11 +72,11 @@ make test
 ```
 ### Integration
 
-To use OctoMark in your own project, include the logic from `octomark.c` (or define `OCTOMARK_NO_MAIN` to include it as a header-like file).
+To use OctoMark in your own project, include the logic from `src/octomark.c` (or define `OCTOMARK_NO_MAIN` to include it as a header-like file).
 
 ```c
 #define OCTOMARK_NO_MAIN
-#include "octomark.c"
+#include "src/octomark.c"
 
 int main() {
     OctomarkParser parser;
@@ -99,7 +99,7 @@ int main() {
 
 ## Testing
 
-A correctness test suite is provided in `test.c` which mirrors the JavaScript benchmark suite.
+A correctness test suite is provided in `test/test.c` which mirrors the JavaScript benchmark suite.
 
 ```bash
 make test
