@@ -86,7 +86,7 @@ typedef struct {
 
 void octomark_init(OctomarkParser *parser) {
   memset(parser, 0, sizeof(OctomarkParser));
-  for (const char *s = "\['*`&<>\"'_~!$h"; *s; s++)
+  for (const char *s = "\\['*`&<>\"'_~!$h"; *s; s++)
     parser->is_special_char[(unsigned char)*s] = true;
   parser->html_escape_map['&'] = "&amp;";
   parser->html_escape_map['<'] = "&lt;";
@@ -169,6 +169,32 @@ static void parse_inline_content(const OctomarkParser *restrict parser, const ch
                          size_t length, StringBuffer *restrict output) {
   size_t i = 0;
   while (i < length) {
+    size_t start = i;
+    // Fast skip: Check 8 bytes at a time for special characters
+    while (i + 7 < length) {
+      if (parser->is_special_char[(unsigned char)text[i]] ||
+          parser->is_special_char[(unsigned char)text[i + 1]] ||
+          parser->is_special_char[(unsigned char)text[i + 2]] ||
+          parser->is_special_char[(unsigned char)text[i + 3]] ||
+          parser->is_special_char[(unsigned char)text[i + 4]] ||
+          parser->is_special_char[(unsigned char)text[i + 5]] ||
+          parser->is_special_char[(unsigned char)text[i + 6]] ||
+          parser->is_special_char[(unsigned char)text[i + 7]])
+        break;
+      i += 8;
+    }
+    
+    // Skip single bytes until special or end
+    while (i < length && !parser->is_special_char[(unsigned char)text[i]]) {
+      i++;
+    }
+
+    if (i > start) {
+      string_buffer_append_string_n(output, text + start, i - start);
+    }
+    
+    if (i >= length) break;
+    
     char c = text[i];
     if (c == '\\') {
       if (i + 1 < length)
