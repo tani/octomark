@@ -19,12 +19,12 @@ OctoMark is an ultra-high performance, streaming Markdown parser written in pure
 
 ## Performance Benchmark
 
-The benchmark runner repeats `EXAMPLE.md` to reach target sizes and measures
+The benchmark runner (`octomark_benchmark`) repeats `EXAMPLE.md` to reach target sizes and measures
 streaming throughput.
 
 ```bash
-make benchmark
-./benchmark/octomark_benchmark
+make octomark_benchmark
+./octomark_benchmark
 ```
 
 Recent run (EXAMPLE.md on this machine):
@@ -67,8 +67,8 @@ constructs.
 
 ```bash
 make
-make benchmark
-make test
+make octomark_benchmark
+make octomark_test
 ```
 ### Integration
 
@@ -99,11 +99,11 @@ int main() {
 
 ## Testing
 
-A correctness test suite is provided in `test/octomark.c` which mirrors the JavaScript benchmark suite.
+A correctness test suite is provided in `test/octomark.c` and runs via `test/octomark_test`.
 
 ```bash
-make test
-./test/octomark_test
+make octomark_test
+./octomark_test
 ```
 
 ## License
