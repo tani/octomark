@@ -27,6 +27,26 @@ const BlockEntry = struct {
     indent_level: i32,
 };
 
+pub const InlineCache = struct {
+    underscore_fail: usize = std.math.maxInt(usize),
+    double_asterisk_fail: usize = std.math.maxInt(usize),
+    double_tilde_fail: usize = std.math.maxInt(usize),
+    link_fail: usize = std.math.maxInt(usize),
+    math_fail: usize = std.math.maxInt(usize),
+    html_fail: usize = std.math.maxInt(usize),
+    backtick_fail: [16]usize = [_]usize{std.math.maxInt(usize)} ** 16,
+
+    pub fn reset(self: *InlineCache) void {
+        self.underscore_fail = std.math.maxInt(usize);
+        self.double_asterisk_fail = std.math.maxInt(usize);
+        self.double_tilde_fail = std.math.maxInt(usize);
+        self.link_fail = std.math.maxInt(usize);
+        self.math_fail = std.math.maxInt(usize);
+        self.html_fail = std.math.maxInt(usize);
+        @memset(&self.backtick_fail, std.math.maxInt(usize));
+    }
+};
+
 const Buffer = std.ArrayListUnmanaged(u8);
 const AllocError = std.mem.Allocator.Error;
 const ParseError = AllocError || std.fs.File.WriteError || error{ NestingTooDeep, TooManyTableColumns };
@@ -48,6 +68,7 @@ pub const OctomarkParser = struct {
     table_header_storage: Buffer = .{},
     table_header_pending: bool = false,
     allocator: std.mem.Allocator = undefined,
+    inline_cache: InlineCache = .{},
 
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
@@ -195,7 +216,12 @@ pub const OctomarkParser = struct {
         }
     }
 
-    fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: anytype) !void {
+    fn renderInline(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
+        parser.inline_cache.reset();
+        try parser.parseInlineContent(text, output, 0);
+    }
+
+    fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype, abs_offset: usize) !void {
         const length = text.len;
         var i: usize = 0;
         while (i < length) {
@@ -220,12 +246,18 @@ pub const OctomarkParser = struct {
             if (i > start) try output.writeAll(text[start..i]);
             if (i >= length) break;
 
+            const abs_pos = abs_offset + i;
+
             if (text[i] == '<' and parser.options.enable_html) {
-                const tag_len = parseHtmlTag(text[i..]);
-                if (tag_len > 0) {
-                    try output.writeAll(text[i .. i + tag_len]);
-                    i += tag_len;
-                    continue;
+                if (abs_pos < parser.inline_cache.html_fail) {
+                    const tag_len = parseHtmlTag(text[i..]);
+                    if (tag_len > 0) {
+                        try output.writeAll(text[i .. i + tag_len]);
+                        i += tag_len;
+                        continue;
+                    } else {
+                        parser.inline_cache.html_fail = abs_pos;
+                    }
                 }
             }
 
@@ -240,11 +272,18 @@ pub const OctomarkParser = struct {
                 }
             } else if (c == '_') {
                 const content_start = i + 1;
-                const end_offset = std.mem.indexOfScalar(u8, text[content_start..], '_');
-                if (end_offset) |offset| {
-                    const j = content_start + offset;
+                var found_at: ?usize = null;
+                if (abs_pos < parser.inline_cache.underscore_fail) {
+                    if (std.mem.indexOfScalar(u8, text[content_start..], '_')) |offset| {
+                        found_at = content_start + offset;
+                    } else {
+                        parser.inline_cache.underscore_fail = abs_pos;
+                    }
+                }
+
+                if (found_at) |j| {
                     try output.writeAll("<em>");
-                    try parser.parseInlineContent(text[content_start..j], output);
+                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
                     try output.writeAll("</em>");
                     i = j;
                 } else {
@@ -252,11 +291,18 @@ pub const OctomarkParser = struct {
                 }
             } else if (c == '*' and i + 1 < length and text[i + 1] == '*') {
                 const content_start = i + 2;
-                const end_offset = std.mem.indexOf(u8, text[content_start..], "**");
-                if (end_offset) |offset| {
-                    const j = content_start + offset;
+                var found_at: ?usize = null;
+                if (abs_pos < parser.inline_cache.double_asterisk_fail) {
+                    if (std.mem.indexOf(u8, text[content_start..], "**")) |offset| {
+                        found_at = content_start + offset;
+                    } else {
+                        parser.inline_cache.double_asterisk_fail = abs_pos;
+                    }
+                }
+
+                if (found_at) |j| {
                     try output.writeAll("<strong>");
-                    try parser.parseInlineContent(text[content_start..j], output);
+                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
                     try output.writeAll("</strong>");
                     i = j + 1;
                 } else {
@@ -265,77 +311,118 @@ pub const OctomarkParser = struct {
             } else if (c == '`') {
                 var backtick_count: usize = 1;
                 while (i + backtick_count < length and text[i + backtick_count] == '`') : (backtick_count += 1) {}
-                try output.writeAll("<code>");
                 const content_start = i + backtick_count;
+
                 var found = false;
-                while (i + backtick_count < length) {
-                    i += 1;
-                    var match = true;
-                    var k: usize = 0;
-                    while (k < backtick_count) : (k += 1) {
-                        if (i + k >= length or text[i + k] != '`') {
-                            match = false;
-                            break;
-                        }
+                if (backtick_count <= 16 and abs_pos < parser.inline_cache.backtick_fail[backtick_count - 1]) {
+                    var k = content_start;
+                    while (k + backtick_count <= length) {
+                        if (std.mem.indexOfScalarPos(u8, text, k, '`')) |m| {
+                            var match = true;
+                            var n: usize = 0;
+                            while (n < backtick_count) : (n += 1) {
+                                if (m + n >= length or text[m + n] != '`') {
+                                    match = false;
+                                    break;
+                                }
+                            }
+                            if (match) {
+                                // Match must be EXACTLY backtick_count
+                                if (m + backtick_count < length and text[m + backtick_count] == '`') {
+                                    k = m + 1;
+                                    while (k < length and text[k] == '`') k += 1;
+                                    continue;
+                                }
+                                found = true;
+                                try output.writeAll("<code>");
+                                if (m > content_start) try parser.appendEscapedText(text[content_start..m], output);
+                                try output.writeAll("</code>");
+                                i = m + backtick_count - 1;
+                                break;
+                            } else {
+                                k = m + 1;
+                            }
+                        } else break;
                     }
-                    if (match) {
-                        found = true;
-                        break;
+                    if (!found and backtick_count <= 16) {
+                        parser.inline_cache.backtick_fail[backtick_count - 1] = abs_pos;
                     }
                 }
-                if (found) {
-                    if (i > content_start) try parser.appendEscapedText(text[content_start..i], output);
-                    try output.writeAll("</code>");
-                    i += backtick_count - 1;
-                } else {
-                    try output.writeAll("</code>");
-                    i = content_start - 1;
+
+                if (!found) {
+                    handled = false;
                 }
             } else if (c == '~' and i + 1 < length and text[i + 1] == '~') {
-                try output.writeAll("<del>");
-                i += 2;
-                const content_start = i;
-                while (i + 1 < length and (text[i] != '~' or text[i + 1] != '~')) : (i += 1) {}
-                try parser.parseInlineContent(text[content_start..i], output);
-                try output.writeAll("</del>");
-                i += 1;
+                const content_start = i + 2;
+                var found_at: ?usize = null;
+                if (abs_pos < parser.inline_cache.double_tilde_fail) {
+                    if (std.mem.indexOf(u8, text[content_start..], "~~")) |offset| {
+                        found_at = content_start + offset;
+                    } else {
+                        parser.inline_cache.double_tilde_fail = abs_pos;
+                    }
+                }
+
+                if (found_at) |j| {
+                    try output.writeAll("<del>");
+                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
+                    try output.writeAll("</del>");
+                    i = j + 1;
+                } else {
+                    handled = false;
+                }
             } else if (c == '!' or c == '[') {
                 const start_idx = i;
                 if (c == '!') i += 1;
-                if (i < length and text[i] == '[') {
-                    i += 1;
-                    const link_text_start = i;
-                    var depth: usize = 1;
-                    while (i < length and depth > 0) {
-                        if (text[i] == '[') depth += 1 else if (text[i] == ']') depth -= 1;
+                var found_link = false;
+                if (abs_pos < parser.inline_cache.link_fail) {
+                    if (i < length and text[i] == '[') {
                         i += 1;
-                    }
-                    if (i < length and text[i] == '(') {
-                        const link_text_len = i - link_text_start - 1;
-                        i += 1;
-                        const url_start = i;
-                        while (i < length and text[i] != ')' and text[i] != ' ') : (i += 1) {}
-                        const url_len = i - url_start;
-                        while (i < length and text[i] != ')') : (i += 1) {}
-                        if (c == '!') {
-                            try output.writeAll("<img src=\"");
-                            try output.writeAll(text[url_start .. url_start + url_len]);
-                            try output.writeAll("\" alt=\"");
-                            try output.writeAll(text[link_text_start .. link_text_start + link_text_len]);
-                            try output.writeAll("\">");
-                        } else {
-                            try output.writeAll("<a href=\"");
-                            try output.writeAll(text[url_start .. url_start + url_len]);
-                            try output.writeAll("\">");
-                            try parser.parseInlineContent(text[link_text_start .. link_text_start + link_text_len], output);
-                            try output.writeAll("</a>");
+                        const link_text_start = i;
+                        var depth: usize = 1;
+                        while (i < length and depth > 0) {
+                            if (text[i] == '[') depth += 1 else if (text[i] == ']') depth -= 1;
+                            i += 1;
                         }
-                        i += 1;
-                        continue;
+                        if (depth == 0 and i < length and text[i] == '(') {
+                            const link_text_len = i - link_text_start - 1;
+                            i += 1;
+                            const url_start = i;
+                            while (i < length and text[i] != ')' and text[i] != ' ') : (i += 1) {}
+                            const url_len = i - url_start;
+                            while (i < length and text[i] != ')') : (i += 1) {}
+                            if (i < length and text[i] == ')') {
+                                if (c == '!') {
+                                    try output.writeAll("<img src=\"");
+                                    try output.writeAll(text[url_start .. url_start + url_len]);
+                                    try output.writeAll("\" alt=\"");
+                                    try output.writeAll(text[link_text_start .. link_text_start + link_text_len]);
+                                    try output.writeAll("\">");
+                                } else {
+                                    try output.writeAll("<a href=\"");
+                                    try output.writeAll(text[url_start .. url_start + url_len]);
+                                    try output.writeAll("\">");
+                                    try parser.parseInlineContent(text[link_text_start .. link_text_start + link_text_len], output, abs_offset + link_text_start);
+                                    try output.writeAll("</a>");
+                                }
+                                found_link = true;
+                            }
+                        }
+                    }
+                    if (!found_link) {
+                        // Only cache failure if there are no more ']' or no more '('
+                        if (std.mem.indexOfScalar(u8, text[start_idx..], ']') == null or
+                            std.mem.indexOfScalar(u8, text[start_idx..], '(') == null)
+                        {
+                            parser.inline_cache.link_fail = abs_pos;
+                        }
                     }
                 }
-                i = start_idx;
-                handled = false;
+
+                if (!found_link) {
+                    i = start_idx;
+                    handled = false;
+                }
             } else if (c == 'h' and text.len - i >= 7 and
                 std.mem.startsWith(u8, text[i..], "http") and
                 ((text.len - i >= 7 and std.mem.startsWith(u8, text[i + 4 ..], "://")) or
@@ -350,16 +437,23 @@ pub const OctomarkParser = struct {
                 try output.writeAll("</a>");
                 i -= 1;
             } else if (c == '$') {
-                try output.writeAll("<span class=\"math\">");
-                i += 1;
-                const content_start = i;
-                if (std.mem.indexOfScalar(u8, text[content_start..], '$')) |offset| {
-                    i = content_start + offset;
-                } else {
-                    i = length;
+                const content_start = i + 1;
+                var found_at: ?usize = null;
+                if (abs_pos < parser.inline_cache.math_fail) {
+                    if (std.mem.indexOfScalar(u8, text[content_start..], '$')) |offset| {
+                        found_at = content_start + offset;
+                    } else {
+                        parser.inline_cache.math_fail = abs_pos;
+                    }
                 }
-                if (i > content_start) try parser.appendEscapedText(text[content_start..i], output);
-                try output.writeAll("</span>");
+                if (found_at) |j| {
+                    try output.writeAll("<span class=\"math\">");
+                    try parser.appendEscapedText(text[content_start..j], output);
+                    try output.writeAll("</span>");
+                    i = j;
+                } else {
+                    handled = false;
+                }
             } else {
                 handled = false;
             }
@@ -439,7 +533,7 @@ pub const OctomarkParser = struct {
                 try output.writeAll("<h");
                 try output.writeByte(level_char);
                 try output.writeAll(">");
-                try parser.parseInlineContent(line_content[level + 1 ..], output);
+                try parser.renderInline(line_content[level + 1 ..], output);
                 try output.writeAll("</h");
                 try output.writeByte(level_char);
                 try output.writeAll(">\n");
@@ -547,7 +641,7 @@ pub const OctomarkParser = struct {
                         .none => {},
                     }
                     try output.writeAll(">");
-                    try parser.parseInlineContent(body_cells[k], output);
+                    try parser.renderInline(body_cells[k], output);
                     try output.writeAll("</td>");
                 }
                 try output.writeAll("</tr>\n");
@@ -615,7 +709,7 @@ pub const OctomarkParser = struct {
                         .none => {},
                     }
                     try output.writeAll(">");
-                    try parser.parseInlineContent(header_cells[k], output);
+                    try parser.renderInline(header_cells[k], output);
                     try output.writeAll("</th>");
                 }
                 try output.writeAll("</tr></thead><tbody>\n");
@@ -655,7 +749,7 @@ pub const OctomarkParser = struct {
                         try parser.pushBlock(.definition_list, 0);
                     }
                     try output.writeAll("<dt>");
-                    try parser.parseInlineContent(line_content, output);
+                    try parser.renderInline(line_content, output);
                     try output.writeAll("</dt>\n");
                     return true;
                 }
@@ -678,7 +772,7 @@ pub const OctomarkParser = struct {
         }
 
         const line_break = (line_content.len >= 2 and line_content[line_content.len - 1] == ' ' and line_content[line_content.len - 2] == ' ');
-        try parser.parseInlineContent(if (line_break) line_content[0 .. line_content.len - 2] else line_content, output);
+        try parser.renderInline(if (line_break) line_content[0 .. line_content.len - 2] else line_content, output);
         if (line_break) try output.writeAll("<br>");
     }
 

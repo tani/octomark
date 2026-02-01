@@ -72,6 +72,8 @@ test "octomark cases" {
         tc("HTML Support", "<b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> <invalid\nMixed with **Markdown**: <i>Italic</i> and `code`", "<p><b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> &lt;invalid\nMixed with <strong>Markdown</strong>: <i>Italic</i> and <code>code</code></p>\n", true),
         tc("Strong Fallback", "**No Closing", "<p>**No Closing</p>\n", false),
         tc("Emphasis Fallback", "_No Closing", "<p>_No Closing</p>\n", false),
+        tc("Multi-backtick", "`` code ` ``", "<p><code> code ` </code></p>\n", false),
+        tc("Backtick Mismatch", "a ``` code ``", "<p>a `<code> code </code></p>\n", false),
     };
 
     const allocator = std.testing.allocator;
