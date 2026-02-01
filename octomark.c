@@ -8,637 +8,714 @@ typedef struct {
   char *data;
   size_t size;
   size_t capacity;
-} Buffer;
+} StringBuffer;
 
-static void buf_init(Buffer *b, size_t cap) {
-  b->data = (char *)malloc(cap);
-  b->data[0] = '\0';
-  b->size = 0;
-  b->capacity = cap;
+static void string_buffer_init(StringBuffer *buffer, size_t initial_capacity) {
+  buffer->data = (char *)malloc(initial_capacity);
+  buffer->data[0] = '\0';
+  buffer->size = 0;
+  buffer->capacity = initial_capacity;
 }
 
-static void buf_grow(Buffer *b, size_t m) {
-  if (b->capacity >= m)
+static void string_buffer_grow(StringBuffer *buffer, size_t required_capacity) {
+  if (buffer->capacity >= required_capacity)
     return;
-  size_t n = b->capacity * 2;
-  if (n < m)
-    n = m;
-  b->data = (char *)realloc(b->data, n);
-  b->capacity = n;
+  size_t new_capacity = buffer->capacity * 2;
+  if (new_capacity < required_capacity)
+    new_capacity = required_capacity;
+  buffer->data = (char *)realloc(buffer->data, new_capacity);
+  buffer->capacity = new_capacity;
 }
 
-static void buf_push(Buffer *b, char c) {
-  if (b->size + 2 > b->capacity)
-    buf_grow(b, b->size + 2);
-  b->data[b->size++] = c;
-  b->data[b->size] = '\0';
+static void string_buffer_append_char(StringBuffer *buffer, char c) {
+  if (buffer->size + 2 > buffer->capacity)
+    string_buffer_grow(buffer, buffer->size + 2);
+  buffer->data[buffer->size++] = c;
+  buffer->data[buffer->size] = '\0';
 }
 
-static void buf_append_n(Buffer *b, const char *s, size_t n) {
-  if (n == 0)
+static void string_buffer_append_string_n(StringBuffer *buffer, const char *str, size_t length) {
+  if (length == 0)
     return;
-  if (b->size + n + 1 > b->capacity)
-    buf_grow(b, b->size + n + 1);
-  memcpy(b->data + b->size, s, n);
-  b->size += n;
-  b->data[b->size] = '\0';
+  if (buffer->size + length + 1 > buffer->capacity)
+    string_buffer_grow(buffer, buffer->size + length + 1);
+  memcpy(buffer->data + buffer->size, str, length);
+  buffer->size += length;
+  buffer->data[buffer->size] = '\0';
 }
 
-static void buf_append(Buffer *b, const char *s) {
-  buf_append_n(b, s, strlen(s));
+static void string_buffer_append_string(StringBuffer *buffer, const char *str) {
+  string_buffer_append_string_n(buffer, str, strlen(str));
 }
 
-static void buf_free(Buffer *b) {
-  free(b->data);
-  b->data = NULL;
-  b->size = b->capacity = 0;
+static void string_buffer_free(StringBuffer *buffer) {
+  free(buffer->data);
+  buffer->data = NULL;
+  buffer->size = buffer->capacity = 0;
 }
 
-#define MAX_DEPTH 32
-enum { T_UL, T_OL, T_QUOTE, T_DL, T_DD, T_CODE, T_MATH, T_TABLE, T_P };
+#define MAX_BLOCK_NESTING 32
+enum {
+  BLOCK_UNORDERED_LIST,
+  BLOCK_ORDERED_LIST,
+  BLOCK_BLOCKQUOTE,
+  BLOCK_DEFINITION_LIST,
+  BLOCK_DEFINITION_DESCRIPTION,
+  BLOCK_CODE,
+  BLOCK_MATH,
+  BLOCK_TABLE,
+  BLOCK_PARAGRAPH
+};
 
 typedef struct {
-  int type, indent;
-} Entry;
+  int block_type;
+  int indent_level;
+} BlockEntry;
 
-typedef enum { ALIGN_NONE, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } Align;
+typedef enum { ALIGN_NONE, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } TableAlignment;
 
 typedef struct {
-  bool spec[256];
-  const char *esc[256];
-  Align t_aligns[64];
-  size_t t_cols;
-  Entry stack[MAX_DEPTH];
-  size_t stack_size;
-  Buffer leftover;
-} OctoMark;
+  bool is_special_char[256];
+  const char *html_escape_map[256];
+  TableAlignment table_alignments[64];
+  size_t table_column_count;
+  BlockEntry block_stack[MAX_BLOCK_NESTING];
+  size_t stack_depth;
+  StringBuffer pending_buffer;
+} OctomarkParser;
 
-void octomark_init(OctoMark *om) {
-  memset(om, 0, sizeof(OctoMark));
-  for (const char *s = "\\['*`&<>\"_~!$h"; *s; s++)
-    om->spec[(unsigned char)*s] = true;
-  om->esc['&'] = "&amp;";
-  om->esc['<'] = "&lt;";
-  om->esc['>'] = "&gt;";
-  om->esc['"'] = "&quot;";
-  om->esc['\''] = "&#39;";
-  buf_init(&om->leftover, 4096);
+void octomark_init(OctomarkParser *parser) {
+  memset(parser, 0, sizeof(OctomarkParser));
+  for (const char *s = "\['*`&<>\"'_~!$h"; *s; s++)
+    parser->is_special_char[(unsigned char)*s] = true;
+  parser->html_escape_map['&'] = "&amp;";
+  parser->html_escape_map['<'] = "&lt;";
+  parser->html_escape_map['>'] = "&gt;";
+  parser->html_escape_map['"'] = "&quot;";
+  parser->html_escape_map['\''] = "&#39;";
+  string_buffer_init(&parser->pending_buffer, 4096);
 }
-void octomark_free(OctoMark *om) { buf_free(&om->leftover); }
+void octomark_free(OctomarkParser *parser) { string_buffer_free(&parser->pending_buffer); }
 
-static inline void stack_push(OctoMark *om, int type, int indent) {
-  if (om->stack_size < MAX_DEPTH) {
-    om->stack[om->stack_size++] = (Entry){type, indent};
+static inline void push_block(OctomarkParser *parser, int type, int indent) {
+  if (parser->stack_depth < MAX_BLOCK_NESTING) {
+    parser->block_stack[parser->stack_depth++] = (BlockEntry){type, indent};
   }
 }
 
-static inline Entry *stack_peek(OctoMark *om) {
-  return om->stack_size > 0 ? &om->stack[om->stack_size - 1] : NULL;
+static inline BlockEntry *peek_block(OctomarkParser *parser) {
+  return parser->stack_depth > 0 ? &parser->block_stack[parser->stack_depth - 1] : NULL;
 }
 
-static inline void stack_pop(OctoMark *om) {
-  if (om->stack_size > 0)
-    om->stack_size--;
+static inline void pop_block(OctomarkParser *parser) {
+  if (parser->stack_depth > 0)
+    parser->stack_depth--;
 }
 
-static inline int top_type(const OctoMark *om) {
-  return om->stack_size > 0 ? om->stack[om->stack_size - 1].type : -1;
+static inline int get_current_block_type(const OctomarkParser *parser) {
+  return parser->stack_depth > 0 ? parser->block_stack[parser->stack_depth - 1].block_type : -1;
 }
 
-static void pop(OctoMark *om, Buffer *out) {
-  if (om->stack_size == 0)
+static void render_and_close_top_block(OctomarkParser *parser, StringBuffer *output) {
+  if (parser->stack_depth == 0)
     return;
-  int t = stack_peek(om)->type;
-  stack_pop(om);
-  if (t == T_UL)
-    buf_append(out, "</li>\n</ul>\n");
-  else if (t == T_OL)
-    buf_append(out, "</li>\n</ol>\n");
-  else if (t == T_QUOTE)
-    buf_append(out, "</blockquote>\n");
-  else if (t == T_DL)
-    buf_append(out, "</dl>\n");
-  else if (t == T_DD)
-    buf_append(out, "</dd>\n");
-  else if (t == T_CODE)
-    buf_append(out, "</code></pre>\n");
-  else if (t == T_MATH)
-    buf_append(out, "</div>\n");
-  else if (t == T_TABLE)
-    buf_append(out, "</tbody></table>\n");
-  else if (t == T_P)
-    buf_append(out, "</p>\n");
+  int type = peek_block(parser)->block_type;
+  pop_block(parser);
+  if (type == BLOCK_UNORDERED_LIST)
+    string_buffer_append_string(output, "</li>\n</ul>\n");
+  else if (type == BLOCK_ORDERED_LIST)
+    string_buffer_append_string(output, "</li>\n</ol>\n");
+  else if (type == BLOCK_BLOCKQUOTE)
+    string_buffer_append_string(output, "</blockquote>\n");
+  else if (type == BLOCK_DEFINITION_LIST)
+    string_buffer_append_string(output, "</dl>\n");
+  else if (type == BLOCK_DEFINITION_DESCRIPTION)
+    string_buffer_append_string(output, "</dd>\n");
+  else if (type == BLOCK_CODE)
+    string_buffer_append_string(output, "</code></pre>\n");
+  else if (type == BLOCK_MATH)
+    string_buffer_append_string(output, "</div>\n");
+  else if (type == BLOCK_TABLE)
+    string_buffer_append_string(output, "</tbody></table>\n");
+  else if (type == BLOCK_PARAGRAPH)
+    string_buffer_append_string(output, "</p>\n");
 }
 
-static void close_p(OctoMark *om, Buffer *out) {
-  if (top_type(om) == T_P)
-    pop(om, out);
+static void close_paragraph_if_open(OctomarkParser *parser, StringBuffer *output) {
+  if (get_current_block_type(parser) == BLOCK_PARAGRAPH)
+    render_and_close_top_block(parser, output);
 }
 
-static void close_leaf_blocks(OctoMark *om, Buffer *out) {
-  int t = top_type(om);
-  if (t == T_P || t == T_TABLE || t == T_CODE || t == T_MATH)
-    pop(om, out);
+static void close_leaf_blocks(OctomarkParser *parser, StringBuffer *output) {
+  int type = get_current_block_type(parser);
+  if (type == BLOCK_PARAGRAPH || type == BLOCK_TABLE || type == BLOCK_CODE || type == BLOCK_MATH)
+    render_and_close_top_block(parser, output);
 }
 
-static inline void escape(const OctoMark *restrict om, const char *restrict s,
-                          size_t l, Buffer *restrict out) {
-  for (size_t i = 0; i < l; i++) {
-    const char *e = om->esc[(unsigned char)s[i]];
-    if (e)
-      buf_append(out, e);
+static inline void append_escaped_text(const OctomarkParser *restrict parser, const char *restrict text,
+                          size_t length, StringBuffer *restrict output) {
+  for (size_t i = 0; i < length; i++) {
+    const char *entity = parser->html_escape_map[(unsigned char)text[i]];
+    if (entity)
+      string_buffer_append_string(output, entity);
     else
-      buf_push(out, s[i]);
+      string_buffer_append_char(output, text[i]);
   }
 }
 static const char *tag_open[] = {"", "<em>", "<strong>", "<strong><em>"};
 static const char *tag_close[] = {"", "</em>", "</strong>", "</em></strong>"};
 
-static void parse_inline(const OctoMark *restrict om, const char *restrict text,
-                         size_t len, Buffer *restrict out) {
+static void parse_inline_content(const OctomarkParser *restrict parser, const char *restrict text,
+                         size_t length, StringBuffer *restrict output) {
   size_t i = 0;
-  while (i < len) {
+  while (i < length) {
     char c = text[i];
     if (c == '\\') {
-      if (i + 1 < len)
-        buf_push(out, text[++i]);
+      if (i + 1 < length)
+        string_buffer_append_char(output, text[++i]);
       else
-        buf_append(out, "<br>");
-    } else if ((c == '*' || c == '_') && i + 1 < len) {
-      int n = 1;
-      while (i + n < len && text[i + n] == c)
-        n++;
-      if (n > 3)
-        n = 3;
-      buf_append(out, tag_open[n]);
-      size_t st = i + n, cl = 0;
-      i += n;
-      while (i < len) {
-        if (text[i] == c && ++cl == n)
+        string_buffer_append_string(output, "<br>");
+    } else if ((c == '*' || c == '_') && i + 1 < length) {
+      int count = 1;
+      while (i + count < length && text[i + count] == c)
+        count++;
+      if (count > 3)
+        count = 3;
+      string_buffer_append_string(output, tag_open[count]);
+      size_t content_start = i + count, close_count = 0;
+      i += count;
+      while (i < length) {
+        if (text[i] == c && ++close_count == count)
           break;
         if (text[i] != c)
-          cl = 0;
+          close_count = 0;
         i++;
       }
-      parse_inline(om, text + st, i - st - n + 1, out);
-      buf_append(out, tag_close[n]);
+      parse_inline_content(parser, text + content_start, i - content_start - count + 1, output);
+      string_buffer_append_string(output, tag_close[count]);
     } else if (c == '`') {
-      int cnt = 1;
-      while (i + cnt < len && text[i + cnt] == '`')
-        cnt++;
-      buf_append(out, "<code>");
-      size_t s = i + cnt;
-      while (i + cnt < len) {
+      int backtick_count = 1;
+      while (i + backtick_count < length && text[i + backtick_count] == '`')
+        backtick_count++;
+      string_buffer_append_string(output, "<code>");
+      size_t content_start = i + backtick_count;
+      while (i + backtick_count < length) {
         i++;
-        bool m = true;
-        for (int k = 0; k < cnt; k++)
-          if (i + k >= len || text[i + k] != '`') {
-            m = false;
+        bool match = true;
+        for (int k = 0; k < backtick_count; k++)
+          if (i + k >= length || text[i + k] != '`') {
+            match = false;
             break;
           }
-        if (m)
+        if (match)
           break;
       }
-      escape(om, text + s, i - s, out);
-      buf_append(out, "</code>");
-      i += cnt - 1;
-    } else if (c == '~' && i + 1 < len && text[i + 1] == '~') {
-      buf_append(out, "<del>");
+      append_escaped_text(parser, text + content_start, i - content_start, output);
+      string_buffer_append_string(output, "</code>");
+      i += backtick_count - 1;
+    } else if (c == '~' && i + 1 < length && text[i + 1] == '~') {
+      string_buffer_append_string(output, "<del>");
       i += 2;
-      size_t s = i;
-      while (i + 1 < len && (text[i] != '~' || text[i + 1] != '~'))
+      size_t content_start = i;
+      while (i + 1 < length && (text[i] != '~' || text[i + 1] != '~'))
         i++;
-      parse_inline(om, text + s, i - s, out);
-      buf_append(out, "</del>");
+      parse_inline_content(parser, text + content_start, i - content_start, output);
+      string_buffer_append_string(output, "</del>");
       i++;
     } else if (c == '!' || c == '[') {
       size_t start_idx = i;
       if (c == '!')
         i++;
-      if (i < len && text[i] == '[') {
+      if (i < length && text[i] == '[') {
         i++;
-        size_t s = i, d = 1;
-        while (i < len && d > 0) {
+        size_t link_text_start = i, depth = 1;
+        while (i < length && depth > 0) {
           if (text[i] == '[')
-            d++;
+            depth++;
           else if (text[i] == ']')
-            d--;
+            depth--;
           i++;
         }
-        if (i < len && text[i] == '(') {
-          size_t txt_len = i - s - 1;
+        if (i < length && text[i] == '(') {
+          size_t link_text_len = i - link_text_start - 1;
           i++;
-          size_t us = i;
-          while (i < len && text[i] != ')' && text[i] != ' ')
+          size_t url_start = i;
+          while (i < length && text[i] != ')' && text[i] != ' ')
             i++;
-          size_t ul = i - us;
-          while (i < len && text[i] != ')')
+          size_t url_len = i - url_start;
+          while (i < length && text[i] != ')')
             i++;
           if (c == '!') {
-            buf_append(out, "<img src=\"");
-            buf_append_n(out, text + us, ul);
-            buf_append(out, "\" alt=\"");
-            buf_append_n(out, text + s, txt_len);
-            buf_append(out, "\">");
+            string_buffer_append_string(output, "<img src=\"");
+            string_buffer_append_string_n(output, text + url_start, url_len);
+            string_buffer_append_string(output, "\" alt=\"");
+            string_buffer_append_string_n(output, text + link_text_start, link_text_len);
+            string_buffer_append_string(output, "\">");
           } else {
-            buf_append(out, "<a href=\"");
-            buf_append_n(out, text + us, ul);
-            buf_append(out, "\">");
-            parse_inline(om, text + s, txt_len, out);
-            buf_append(out, "</a>");
+            string_buffer_append_string(output, "<a href=\"");
+            string_buffer_append_string_n(output, text + url_start, url_len);
+            string_buffer_append_string(output, "\">");
+            parse_inline_content(parser, text + link_text_start, link_text_len, output);
+            string_buffer_append_string(output, "</a>");
           }
-          goto next;
+          goto next_iteration;
         }
       }
       i = start_idx;
-      goto def;
+      goto default_char;
     } else if (c == 'h' && (strncmp(text + i, "http", 4) == 0) &&
                (strncmp(text + i + 4, "://", 3) == 0 ||
                 strncmp(text + i + 4, "s://", 4) == 0)) {
-      size_t st = i;
-      while (i < len && !isspace(text[i]) && text[i] != '<' && text[i] != '>')
+      size_t url_start = i;
+      while (i < length && !isspace(text[i]) && text[i] != '<' && text[i] != '>')
         i++;
-      buf_append(out, "<a href=\"");
-      buf_append_n(out, text + st, i - st);
-      buf_append(out, "\">");
-      buf_append_n(out, text + st, i - st);
-      buf_append(out, "</a>");
+      string_buffer_append_string(output, "<a href=\"");
+      string_buffer_append_string_n(output, text + url_start, i - url_start);
+      string_buffer_append_string(output, "\">");
+      string_buffer_append_string_n(output, text + url_start, i - url_start);
+      string_buffer_append_string(output, "</a>");
       i--;
     } else if (c == '$') {
-      buf_append(out, "<span class=\"math\">");
+      string_buffer_append_string(output, "<span class=\"math\">");
       i++;
-      size_t s = i;
-      while (i < len && text[i] != '$')
+      size_t content_start = i;
+      while (i < length && text[i] != '$')
         i++;
-      escape(om, text + s, i - s, out);
-      buf_append(out, "</span>");
+      append_escaped_text(parser, text + content_start, i - content_start, output);
+      string_buffer_append_string(output, "</span>");
     } else {
-    def:
-      if (om->esc[(unsigned char)c])
-        buf_append(out, om->esc[(unsigned char)c]);
+    default_char:
+      if (parser->html_escape_map[(unsigned char)c])
+        string_buffer_append_string(output, parser->html_escape_map[(unsigned char)c]);
       else
-        buf_push(out, c);
+        string_buffer_append_char(output, c);
     }
-  next:
+  next_iteration:
     i++;
   }
 }
-static size_t split(const char *l, size_t n, const char **c, size_t *s) {
-  size_t cnt = 0, i = 0;
-  while (i < n && isspace(l[i]))
+static size_t split_table_row_cells(const char *line, size_t length, const char **cells, size_t *cell_lengths) {
+  size_t count = 0, i = 0;
+  while (i < length && isspace(line[i]))
     i++;
-  if (i < n && l[i] == '|')
+  if (i < length && line[i] == '|') 
     i++;
-  while (i < n) {
-    while (i < n && isspace(l[i]))
+  while (i < length) {
+    while (i < length && isspace(line[i]))
       i++;
-    if (i >= n || l[i] == '\n')
+    if (i >= length || line[i] == '\n')
       break;
-    c[cnt] = l + i;
-    size_t st = i;
-    while (i < n && l[i] != '|' && l[i] != '\n')
+    cells[count] = line + i;
+    size_t start = i;
+    while (i < length && line[i] != '|' && line[i] != '\n')
       i++;
-    size_t ed = i;
-    while (ed > st && isspace(l[ed - 1]))
-      ed--;
-    s[cnt++] = ed - st;
-    if (i < n && l[i] == '|')
+    size_t end = i;
+    while (end > start && isspace(line[end - 1]))
+      end--;
+    cell_lengths[count++] = end - start;
+    if (i < length && line[i] == '|') 
       i++;
   }
-  return cnt;
+  return count;
 }
-static bool is_block(const char *s, size_t len) {
-  if (len >= 3 && strncmp(s, "```", 3) == 0)
+static bool is_block_start_marker(const char *str, size_t len) {
+  if (len >= 3 && strncmp(str, "```", 3) == 0)
     return true;
-  if (len >= 2 && s[0] == '$' && s[1] == '$')
+  if (len >= 2 && str[0] == '$' && str[1] == '$')
     return true;
-  if (len >= 1 && (s[0] == '#' || s[0] == ':'))
+  if (len >= 1 && (str[0] == '#' || str[0] == ':'))
     return true;
-  if (len >= 2 && s[0] == '-' && s[1] == ' ')
+  if (len >= 2 && str[0] == '-' && str[1] == ' ')
     return true;
-  if (len >= 3 && isdigit(s[0]) && s[1] == '.' && s[2] == ' ')
+  if (len >= 3 && isdigit(str[0]) && str[1] == '.' && str[2] == ' ')
     return true;
-  if (len >= 3 && (strncmp(s, "---", 3) == 0 || strncmp(s, "***", 3) == 0 ||
-                   strncmp(s, "___", 3) == 0))
+  if (len >= 3 && (strncmp(str, "---", 3) == 0 || strncmp(str, "***", 3) == 0 ||
+                   strncmp(str, "___", 3) == 0))
     return true;
   return false;
 }
 
-bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
-                  const char *restrict full, size_t pos, Buffer *restrict out) {
-  int top = top_type(om);
-  if (top == T_CODE) {
-    size_t ts = 0;
-    while (ts < len && isspace(line[ts]))
-      ts++;
-    if (len - ts >= 3 && strncmp(line + ts, "```", 3) == 0) {
-      pop(om, out);
-      return false;
-    }
-    escape(om, line, len, out);
-    buf_push(out, '\n');
+static bool process_leaf_block_continuation(OctomarkParser *parser, const char *line, size_t len,
+                                     StringBuffer *output) {
+  int top = get_current_block_type(parser);
+  if (top != BLOCK_CODE && top != BLOCK_MATH)
     return false;
-  }
-  if (top == T_MATH) {
-    size_t ts = 0;
-    while (ts < len && isspace(line[ts]))
-      ts++;
-    if (len - ts >= 2 && strncmp(line + ts, "$$", 2) == 0) {
-      pop(om, out);
-      return false;
+
+  size_t trim_start = 0;
+  while (trim_start < len && isspace(line[trim_start]))
+    trim_start++;
+
+  if (top == BLOCK_CODE) {
+    if (len - trim_start >= 3 && strncmp(line + trim_start, "```", 3) == 0) {
+      render_and_close_top_block(parser, output);
+      return true;
     }
-    escape(om, line, len, out);
-    buf_push(out, '\n');
-    return false;
-  }
-
-  size_t ls = 0;
-  while (ls < len && line[ls] == ' ')
-    ls++;
-  const char *rel = line + ls;
-  size_t rlen = len - ls;
-
-  if (rlen == 0) {
-    close_leaf_blocks(om, out);
-    while (om->stack_size > 0 && top_type(om) >= T_QUOTE)
-      pop(om, out);
-    return false;
-  }
-
-  size_t ql = 0;
-  while (rlen > 0 && rel[0] == '>') {
-    ql++;
-    rel++;
-    rlen--;
-    if (rlen > 0 && rel[0] == ' ') {
-      rel++;
-      rlen--;
+  } else { /* BLOCK_MATH */
+    if (len - trim_start >= 2 && strncmp(line + trim_start, "$$", 2) == 0) {
+      render_and_close_top_block(parser, output);
+      return true;
     }
   }
+  append_escaped_text(parser, line, len, output);
+  string_buffer_append_char(output, '\n');
+  return true;
+}
 
-  size_t cur_ql = 0;
-  for (size_t k = 0; k < om->stack_size; k++)
-    if (om->stack[k].type == T_QUOTE)
-      cur_ql++;
-
-  if (ql < cur_ql && top_type(om) == T_P) {
-    size_t ti = 0;
-    while (ti < rlen && rel[ti] == ' ')
-      ti++;
-    if (!is_block(rel + ti, rlen - ti))
-      ql = cur_ql;
-  }
-
-  while (cur_ql > ql) {
-    int t = top_type(om);
-    pop(om, out);
-    if (t == T_QUOTE)
-      cur_ql--;
-  }
-
-  while (om->stack_size < ql) {
-    close_p(om, out);
-    buf_append(out, "<blockquote>");
-    stack_push(om, T_QUOTE, 0);
-  }
-
-  bool hdd = (rlen > 0 && rel[0] == ':');
-  if (hdd) {
-    rel++;
-    rlen--;
-    if (rlen > 0 && rel[0] == ' ') {
-      rel++;
-      rlen--;
+static bool try_parse_fenced_code_block(OctomarkParser *parser, const char *line_content, size_t remaining_len,
+                       StringBuffer *output) {
+  if (remaining_len >= 3 && strncmp(line_content, "```", 3) == 0) {
+    close_leaf_blocks(parser, output);
+    string_buffer_append_string(output, "<pre><code");
+    size_t lang_len = 0;
+    while (3 + lang_len < remaining_len && !isspace(line_content[3 + lang_len]))
+      lang_len++;
+    if (lang_len > 0) {
+      string_buffer_append_string(output, " class=\"language-");
+      append_escaped_text(parser, line_content + 3, lang_len, output);
+      string_buffer_append_string(output, "\"");
     }
-    close_p(om, out);
+    string_buffer_append_string(output, ">");
+    push_block(parser, BLOCK_CODE, 0);
+    return true;
+  }
+  return false;
+}
+
+static bool try_parse_math_block(OctomarkParser *parser, const char *line_content, size_t remaining_len, StringBuffer *output) {
+  if (remaining_len >= 2 && line_content[0] == '$' && line_content[1] == '$') {
+    close_leaf_blocks(parser, output);
+    string_buffer_append_string(output, "<div class=\"math\">\n");
+    push_block(parser, BLOCK_MATH, 0);
+    return true;
+  }
+  return false;
+}
+
+static bool try_parse_header(OctomarkParser *parser, const char *line_content, size_t remaining_len,
+                       StringBuffer *output) {
+  if (remaining_len >= 2 && line_content[0] == '#') {
+    size_t level = 0;
+    while (level < 6 && level < remaining_len && line_content[level] == '#')
+      level++;
+    if (level < remaining_len && line_content[level] == ' ') {
+      close_leaf_blocks(parser, output);
+      char tag[] = "<h1>";
+      tag[2] = '0' + level;
+      string_buffer_append_string(output, tag);
+      parse_inline_content(parser, line_content + level + 1, remaining_len - level - 1, output);
+      tag[1] = '/';
+      tag[2] = 'h';
+      tag[3] = '0' + level;
+      string_buffer_append_string_n(output, tag, 4);
+      string_buffer_append_string(output, ">\n");
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool try_parse_horizontal_rule(OctomarkParser *parser, const char *line_content, size_t remaining_len, StringBuffer *output) {
+  if (remaining_len == 3 &&
+      (strncmp(line_content, "---", 3) == 0 || strncmp(line_content, "***", 3) == 0 ||
+       strncmp(line_content, "___", 3) == 0)) {
+    close_leaf_blocks(parser, output);
+    string_buffer_append_string(output, "<hr>\n");
+    return true;
+  }
+  return false;
+}
+
+static bool try_parse_definition_list(OctomarkParser *parser, const char **line_content_ptr, size_t *remaining_len_ptr, size_t leading_spaces,
+                   StringBuffer *output) {
+  const char *line_content = *line_content_ptr;
+  size_t remaining_len = *remaining_len_ptr;
+  if (remaining_len > 0 && line_content[0] == ':') {
+    line_content++;
+    remaining_len--;
+    if (remaining_len > 0 && line_content[0] == ' ') {
+      line_content++;
+      remaining_len--;
+    }
+    close_paragraph_if_open(parser, output);
     bool in_dl = false, in_dd = false;
-    for (size_t k = 0; k < om->stack_size; k++) {
-      if (om->stack[k].type == T_DL)
+    for (size_t k = 0; k < parser->stack_depth; k++) {
+      if (parser->block_stack[k].block_type == BLOCK_DEFINITION_LIST)
         in_dl = true;
-      if (om->stack[k].type == T_DD)
+      if (parser->block_stack[k].block_type == BLOCK_DEFINITION_DESCRIPTION)
         in_dd = true;
     }
     if (!in_dl) {
-      buf_append(out, "<dl>\n");
-      stack_push(om, T_DL, (int)ls);
+      string_buffer_append_string(output, "<dl>\n");
+      push_block(parser, BLOCK_DEFINITION_LIST, (int)leading_spaces);
     }
     if (in_dd)
-      while (top_type(om) != T_DL && om->stack_size > 0)
-        pop(om, out);
-    buf_append(out, "<dd>");
-    stack_push(om, T_DD, (int)ls);
+      while (get_current_block_type(parser) != BLOCK_DEFINITION_LIST && parser->stack_depth > 0)
+        render_and_close_top_block(parser, output);
+    string_buffer_append_string(output, "<dd>");
+    push_block(parser, BLOCK_DEFINITION_DESCRIPTION, (int)leading_spaces);
+    *line_content_ptr = line_content;
+    *remaining_len_ptr = remaining_len;
+    return true;
   }
+  return false;
+}
 
-  size_t ils = 0;
-  while (ils < rlen && rel[ils] == ' ')
-    ils++;
-  bool is_u = (rlen - ils >= 2 && rel[ils] == '-' && rel[ils + 1] == ' '),
-       is_o = (rlen - ils >= 3 && isdigit(rel[ils]) && rel[ils + 1] == '.' &&
-               rel[ils + 2] == ' ');
+static bool try_parse_list_item(OctomarkParser *parser, const char **line_content_ptr, size_t *remaining_len_ptr,
+                     size_t leading_spaces, StringBuffer *output) {
+  const char *line_content = *line_content_ptr;
+  size_t remaining_len = *remaining_len_ptr;
+  size_t internal_spaces = 0;
+  while (internal_spaces < remaining_len && line_content[internal_spaces] == ' ')
+    internal_spaces++;
+  bool is_ul = (remaining_len - internal_spaces >= 2 && line_content[internal_spaces] == '-' && line_content[internal_spaces + 1] == ' '), 
+       is_ol = (remaining_len - internal_spaces >= 3 && isdigit(line_content[internal_spaces]) && line_content[internal_spaces + 1] == '.' &&
+               line_content[internal_spaces + 2] == ' ');
 
-  if (is_u || is_o) {
-    int tt = (is_u ? T_UL : T_OL);
-    int ci = (int)(ls + ils);
-    while (om->stack_size > 0 && top_type(om) < T_QUOTE &&
-           (stack_peek(om)->indent > ci ||
-            (stack_peek(om)->indent == ci && top_type(om) != tt)))
-      pop(om, out);
+  if (is_ul || is_ol) {
+    int target_type = (is_ul ? BLOCK_UNORDERED_LIST : BLOCK_ORDERED_LIST);
+    int current_indent = (int)(leading_spaces + internal_spaces);
+    while (parser->stack_depth > 0 && get_current_block_type(parser) < BLOCK_BLOCKQUOTE &&
+           (peek_block(parser)->indent_level > current_indent ||
+            (peek_block(parser)->indent_level == current_indent && get_current_block_type(parser) != target_type)))
+      render_and_close_top_block(parser, output);
 
-    int top = top_type(om);
-    if (top == tt && stack_peek(om)->indent == ci) {
-      close_leaf_blocks(om, out);
-      buf_append(out, "</li>\n<li>");
+    int top = get_current_block_type(parser);
+    if (top == target_type && peek_block(parser)->indent_level == current_indent) {
+      close_leaf_blocks(parser, output);
+      string_buffer_append_string(output, "</li>\n<li>");
     } else {
-      close_leaf_blocks(om, out);
-      buf_append(out, tt == T_UL ? "<ul>\n<li>" : "<ol>\n<li>");
-      stack_push(om, tt, ci);
+      close_leaf_blocks(parser, output);
+      string_buffer_append_string(output, target_type == BLOCK_UNORDERED_LIST ? "<ul>\n<li>" : "<ol>\n<li>");
+      push_block(parser, target_type, current_indent);
     }
-    rel += ils + (is_u ? 2 : 3);
-    rlen -= ils + (is_u ? 2 : 3);
-    if (is_u && rlen >= 4 && rel[0] == '[' &&
-        (rel[1] == ' ' || rel[1] == 'x') && rel[2] == ']' && rel[3] == ' ') {
-      buf_append(out, rel[1] == 'x'
+    line_content += internal_spaces + (is_ul ? 2 : 3);
+    remaining_len -= internal_spaces + (is_ul ? 2 : 3);
+    if (is_ul && remaining_len >= 4 && line_content[0] == '[' &&
+        (line_content[1] == ' ' || line_content[1] == 'x') && line_content[2] == ']' && line_content[3] == ' ') {
+      string_buffer_append_string(output, line_content[1] == 'x'
                           ? "<input type=\"checkbox\" checked disabled> "
                           : "<input type=\"checkbox\"  disabled> ");
-      rel += 4;
-      rlen -= 4;
+      line_content += 4;
+      remaining_len -= 4;
     }
+    *line_content_ptr = line_content;
+    *remaining_len_ptr = remaining_len;
+    return true;
   }
+  return false;
+}
 
-  if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
-    close_leaf_blocks(om, out);
-    buf_append(out, "<pre><code");
-    size_t ll = 0;
-    while (3 + ll < rlen && !isspace(rel[3 + ll]))
-      ll++;
-    if (ll > 0) {
-      buf_append(out, " class=\"language-");
-      escape(om, rel + 3, ll, out);
-      buf_append(out, "\"");
-    }
-    buf_append(out, ">");
-    stack_push(om, T_CODE, 0);
-    return false;
-  }
-  if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
-    close_leaf_blocks(om, out);
-    buf_append(out, "<div class=\"math\">\n");
-    stack_push(om, T_MATH, 0);
-    return false;
-  }
-  if (rlen >= 2 && rel[0] == '#') {
-    size_t lv = 0;
-    while (lv < 6 && lv < rlen && rel[lv] == '#')
-      lv++;
-    if (lv < rlen && rel[lv] == ' ') {
-      close_leaf_blocks(om, out);
-      char tag[] = "<h1>";
-      tag[2] = '0' + lv;
-      buf_append(out, tag);
-      parse_inline(om, rel + lv + 1, rlen - lv - 1, out);
-      tag[1] = '/';
-      tag[2] = 'h';
-      tag[3] = '0' + lv;
-      buf_append_n(out, tag, 4);
-      buf_append(out, ">\n");
-      return false;
-    }
-  }
-  if (rlen == 3 &&
-      (strncmp(rel, "---", 3) == 0 || strncmp(rel, "***", 3) == 0 ||
-       strncmp(rel, "___", 3) == 0)) {
-    close_leaf_blocks(om, out);
-    buf_append(out, "<hr>\n");
-    return false;
-  }
-
-  if (rlen > 0 && rel[0] == '|') {
-    if (top_type(om) != T_TABLE) {
-      const char *nl = full + pos, *nn = strchr(nl, '\n');
-      if (nn) {
-        const char *la = nl;
-        size_t lal = nn - la, lls = 0;
-        while (lls < lal && la[lls] == ' ')
-          lls++;
-        if (lls < lal && la[lls] == '|') {
-          close_leaf_blocks(om, out);
-          buf_append(out, "<table><thead><tr>");
-          om->t_cols = 0;
-          const char *p = la;
+static bool try_parse_table(OctomarkParser *parser, const char *line_content, size_t remaining_len,
+                      const char *full_data, size_t current_pos, StringBuffer *output) {
+  if (remaining_len > 0 && line_content[0] == '|') {
+    if (get_current_block_type(parser) != BLOCK_TABLE) {
+      const char *next_line = full_data + current_pos, *next_newline = strchr(next_line, '\n');
+      if (next_newline) {
+        const char *lookahead = next_line;
+        size_t lookahead_len = next_newline - lookahead, la_spaces = 0;
+        while (la_spaces < lookahead_len && lookahead[la_spaces] == ' ')
+          la_spaces++;
+        if (la_spaces < lookahead_len && lookahead[la_spaces] == '|') {
+          close_leaf_blocks(parser, output);
+          string_buffer_append_string(output, "<table><thead><tr>");
+          parser->table_column_count = 0;
+          const char *p = lookahead;
           if (*p != '|')
             p = strchr(p, '|');
           if (p)
             p++;
-          while (p && p < nn) {
-            while (p < nn && isspace(*p))
+          while (p && p < next_newline) {
+            while (p < next_newline && isspace(*p))
               p++;
-            if (p >= nn)
+            if (p >= next_newline)
               break;
-            const char *st = p;
-            while (p < nn && *p != '|')
+            const char *start = p;
+            while (p < next_newline && *p != '|')
               p++;
-            const char *ed = p;
-            while (ed > st && isspace(ed[-1]))
-              ed--;
-            Align a = ALIGN_NONE;
-            if (st < ed && st[0] == ':' && ed[-1] == ':')
-              a = ALIGN_CENTER;
-            else if (ed > st && ed[-1] == ':')
-              a = ALIGN_RIGHT;
-            else if (st < ed && st[0] == ':')
-              a = ALIGN_LEFT;
-            om->t_aligns[om->t_cols++] = a;
-            if (p < nn && *p == '|')
+            const char *end = p;
+            while (end > start && isspace(end[-1]))
+              end--;
+            TableAlignment align = ALIGN_NONE;
+            if (start < end && start[0] == ':' && end[-1] == ':')
+              align = ALIGN_CENTER;
+            else if (end > start && end[-1] == ':')
+              align = ALIGN_RIGHT;
+            else if (start < end && start[0] == ':')
+              align = ALIGN_LEFT;
+            parser->table_alignments[parser->table_column_count++] = align;
+            if (p < next_newline && *p == '|') 
               p++;
           }
-          const char *hcs[64];
-          size_t hls[64];
-          size_t hc = split(rel, rlen, hcs, hls);
-          for (size_t k = 0; k < hc; k++) {
-            buf_append(out, "<th");
-            Align a = (k < om->t_cols) ? om->t_aligns[k] : ALIGN_NONE;
-            if (a == ALIGN_LEFT)
-              buf_append(out, " style=\"text-align:left\"");
-            else if (a == ALIGN_CENTER)
-              buf_append(out, " style=\"text-align:center\"");
-            else if (a == ALIGN_RIGHT)
-              buf_append(out, " style=\"text-align:right\"");
-            buf_append(out, ">");
-            parse_inline(om, hcs[k], hls[k], out);
-            buf_append(out, "</th>");
+          const char *header_cells[64];
+          size_t header_lens[64];
+          size_t header_count = split_table_row_cells(line_content, remaining_len, header_cells, header_lens);
+          for (size_t k = 0; k < header_count; k++) {
+            string_buffer_append_string(output, "<th");
+            TableAlignment align = (k < parser->table_column_count) ? parser->table_alignments[k] : ALIGN_NONE;
+            if (align == ALIGN_LEFT)
+              string_buffer_append_string(output, " style=\"text-align:left\"");
+            else if (align == ALIGN_CENTER)
+              string_buffer_append_string(output, " style=\"text-align:center\"");
+            else if (align == ALIGN_RIGHT)
+              string_buffer_append_string(output, " style=\"text-align:right\"");
+            string_buffer_append_string(output, ">");
+            parse_inline_content(parser, header_cells[k], header_lens[k], output);
+            string_buffer_append_string(output, "</th>");
           }
-          buf_append(out, "</tr></thead><tbody>\n");
-          stack_push(om, T_TABLE, 0);
+          string_buffer_append_string(output, "</tr></thead><tbody>\n");
+          push_block(parser, BLOCK_TABLE, 0);
           return true;
         }
       }
     }
-    if (top_type(om) == T_TABLE) {
-      const char *bcs[64];
-      size_t bls[64];
-      size_t bc = split(rel, rlen, bcs, bls);
-      buf_append(out, "<tr>");
-      for (size_t k = 0; k < bc; k++) {
-        buf_append(out, "<td");
-        Align a = (k < om->t_cols) ? om->t_aligns[k] : ALIGN_NONE;
-        if (a == ALIGN_LEFT)
-          buf_append(out, " style=\"text-align:left\"");
-        else if (a == ALIGN_CENTER)
-          buf_append(out, " style=\"text-align:center\"");
-        else if (a == ALIGN_RIGHT)
-          buf_append(out, " style=\"text-align:right\"");
-        buf_append(out, ">");
-        parse_inline(om, bcs[k], bls[k], out);
-        buf_append(out, "</td>");
+    if (get_current_block_type(parser) == BLOCK_TABLE) {
+      const char *body_cells[64];
+      size_t body_lens[64];
+      size_t body_count = split_table_row_cells(line_content, remaining_len, body_cells, body_lens);
+      string_buffer_append_string(output, "<tr>");
+      for (size_t k = 0; k < body_count; k++) {
+        string_buffer_append_string(output, "<td");
+        TableAlignment align = (k < parser->table_column_count) ? parser->table_alignments[k] : ALIGN_NONE;
+        if (align == ALIGN_LEFT)
+          string_buffer_append_string(output, " style=\"text-align:left\"");
+        else if (align == ALIGN_CENTER)
+          string_buffer_append_string(output, " style=\"text-align:center\"");
+        else if (align == ALIGN_RIGHT)
+          string_buffer_append_string(output, " style=\"text-align:right\"");
+        string_buffer_append_string(output, ">");
+        parse_inline_content(parser, body_cells[k], body_lens[k], output);
+        string_buffer_append_string(output, "</td>");
       }
-      buf_append(out, "</tr>\n");
-      return false;
+      string_buffer_append_string(output, "</tr>\n");
+      return true;
     }
   }
-
-  const char *nl = full + pos, *nn = strchr(nl, '\n');
-  if (nn) {
-    const char *p = nl;
-    while (p < nn && isspace(*p))
-      p++;
-    if (p < nn && *p == ':') {
-      close_leaf_blocks(om, out);
-      if (om->stack_size == 0 || top_type(om) != T_DL) {
-        buf_append(out, "<dl>\n");
-        stack_push(om, T_DL, (int)ls);
-      }
-      buf_append(out, "<dt>");
-      parse_inline(om, rel, rlen, out);
-      buf_append(out, "</dt>\n");
-      return false;
-    }
-  }
-
-  bool in_c =
-      (om->stack_size > 0 && (top_type(om) < T_QUOTE || top_type(om) == T_DD));
-  if (top_type(om) != T_P && !in_c) {
-    buf_append(out, "<p>");
-    stack_push(om, T_P, 0);
-  } else if (top_type(om) == T_P || (in_c && !is_u && !is_o && !hdd))
-    buf_push(out, '\n');
-
-  bool br = (rlen >= 2 && rel[rlen - 1] == ' ' && rel[rlen - 2] == ' ');
-  parse_inline(om, rel, br ? rlen - 2 : rlen, out);
-  if (br)
-    buf_append(out, "<br>");
   return false;
 }
-void octomark_feed(OctoMark *om, const char *chunk, size_t len, Buffer *out) {
-  buf_append_n(&om->leftover, chunk, len);
-  char *data = om->leftover.data;
-  size_t size = om->leftover.size, pos = 0;
+
+static bool try_parse_definition_term(OctomarkParser *parser, const char *line_content, size_t remaining_len, const char *full_data,
+                   size_t current_pos, StringBuffer *output) {
+  const char *next_line = full_data + current_pos, *next_newline = strchr(next_line, '\n');
+  if (next_newline) {
+    const char *p = next_line;
+    while (p < next_newline && isspace(*p))
+      p++;
+    if (p < next_newline && *p == ':') {
+      close_leaf_blocks(parser, output);
+      if (parser->stack_depth == 0 || get_current_block_type(parser) != BLOCK_DEFINITION_LIST) {
+        string_buffer_append_string(output, "<dl>\n");
+        push_block(parser, BLOCK_DEFINITION_LIST, 0);
+      }
+      string_buffer_append_string(output, "<dt>");
+      parse_inline_content(parser, line_content, remaining_len, output);
+      string_buffer_append_string(output, "</dt>\n");
+      return true;
+    }
+  }
+  return false;
+}
+
+static void process_paragraph(OctomarkParser *parser, const char *line_content, size_t remaining_len,
+                             bool is_dl, bool is_list, StringBuffer *output) {
+  bool in_container =
+      (parser->stack_depth > 0 && (get_current_block_type(parser) < BLOCK_BLOCKQUOTE || get_current_block_type(parser) == BLOCK_DEFINITION_DESCRIPTION));
+  if (get_current_block_type(parser) != BLOCK_PARAGRAPH && !in_container) {
+    string_buffer_append_string(output, "<p>");
+    push_block(parser, BLOCK_PARAGRAPH, 0);
+  } else if (get_current_block_type(parser) == BLOCK_PARAGRAPH || (in_container && !is_list && !is_dl))
+    string_buffer_append_char(output, '\n');
+
+  bool line_break = (remaining_len >= 2 && line_content[remaining_len - 1] == ' ' && line_content[remaining_len - 2] == ' ');
+  parse_inline_content(parser, line_content, line_break ? remaining_len - 2 : remaining_len, output);
+  if (line_break)
+    string_buffer_append_string(output, "<br>");
+}
+
+bool process_single_line(OctomarkParser *restrict parser, const char *restrict line, size_t len,
+                  const char *restrict full_data, size_t current_pos, StringBuffer *restrict output) {
+  if (process_leaf_block_continuation(parser, line, len, output))
+    return false;
+
+  size_t leading_spaces = 0;
+  while (leading_spaces < len && line[leading_spaces] == ' ')
+    leading_spaces++;
+  const char *line_content = line + leading_spaces;
+  size_t remaining_len = len - leading_spaces;
+
+  if (remaining_len == 0) {
+    close_leaf_blocks(parser, output);
+    while (parser->stack_depth > 0 && get_current_block_type(parser) >= BLOCK_BLOCKQUOTE)
+      render_and_close_top_block(parser, output);
+    return false;
+  }
+
+  size_t quote_level = 0;
+  while (remaining_len > 0 && line_content[0] == '>') {
+    quote_level++;
+    line_content++;
+    remaining_len--;
+    if (remaining_len > 0 && line_content[0] == ' ') {
+      line_content++;
+      remaining_len--;
+    }
+  }
+
+  size_t current_quote_level = 0;
+  for (size_t k = 0; k < parser->stack_depth; k++)
+    if (parser->block_stack[k].block_type == BLOCK_BLOCKQUOTE)
+      current_quote_level++;
+
+  if (quote_level < current_quote_level && get_current_block_type(parser) == BLOCK_PARAGRAPH) {
+    size_t ti = 0;
+    while (ti < remaining_len && line_content[ti] == ' ')
+      ti++;
+    if (!is_block_start_marker(line_content + ti, remaining_len - ti))
+      quote_level = current_quote_level;
+  }
+
+  while (current_quote_level > quote_level) {
+    int t = get_current_block_type(parser);
+    render_and_close_top_block(parser, output);
+    if (t == BLOCK_BLOCKQUOTE)
+      current_quote_level--;
+  }
+
+  while (parser->stack_depth < quote_level) {
+    close_paragraph_if_open(parser, output);
+    string_buffer_append_string(output, "<blockquote>");
+    push_block(parser, BLOCK_BLOCKQUOTE, 0);
+  }
+
+  bool is_dl = try_parse_definition_list(parser, &line_content, &remaining_len, leading_spaces, output);
+  bool is_list = try_parse_list_item(parser, &line_content, &remaining_len, leading_spaces, output);
+
+  if (try_parse_fenced_code_block(parser, line_content, remaining_len, output))
+    return false;
+  if (try_parse_math_block(parser, line_content, remaining_len, output))
+    return false;
+  if (try_parse_header(parser, line_content, remaining_len, output))
+    return false;
+  if (try_parse_horizontal_rule(parser, line_content, remaining_len, output))
+    return false;
+  if (try_parse_table(parser, line_content, remaining_len, full_data, current_pos, output))
+    return true; /* Skip next */
+  if (try_parse_definition_term(parser, line_content, remaining_len, full_data, current_pos, output))
+    return false;
+
+  process_paragraph(parser, line_content, remaining_len, is_dl, is_list, output);
+  return false;
+}
+void octomark_feed(OctomarkParser *parser, const char *chunk, size_t len, StringBuffer *output) {
+  string_buffer_append_string_n(&parser->pending_buffer, chunk, len);
+  char *data = parser->pending_buffer.data;
+  size_t size = parser->pending_buffer.size, pos = 0;
   while (pos < size) {
     char *next = (char *)memchr(data + pos, '\n', size - pos);
     if (!next)
       break;
     size_t line_len = next - (data + pos);
     bool skip =
-        process_line(om, data + pos, line_len, data, pos + line_len + 1, out);
+        process_single_line(parser, data + pos, line_len, data, pos + line_len + 1, output);
     pos += line_len + 1;
     if (skip) {
       char *nn = (char *)memchr(data + pos, '\n', size - pos);
@@ -651,38 +728,38 @@ void octomark_feed(OctoMark *om, const char *chunk, size_t len, Buffer *out) {
   if (pos > 0) {
     size_t rem = size - pos;
     memmove(data, data + pos, rem);
-    om->leftover.size = rem;
+    parser->pending_buffer.size = rem;
     data[rem] = '\0';
   }
 }
-void octomark_finish(OctoMark *om, Buffer *out) {
-  if (om->leftover.size > 0)
-    process_line(om, om->leftover.data, om->leftover.size, om->leftover.data,
-                 om->leftover.size, out);
-  while (om->stack_size > 0)
-    pop(om, out);
+void octomark_finish(OctomarkParser *parser, StringBuffer *output) {
+  if (parser->pending_buffer.size > 0)
+    process_single_line(parser, parser->pending_buffer.data, parser->pending_buffer.size, parser->pending_buffer.data,
+                 parser->pending_buffer.size, output);
+  while (parser->stack_depth > 0)
+    render_and_close_top_block(parser, output);
 }
 #ifndef OCTOMARK_NO_MAIN
 int main() {
-  OctoMark om;
-  octomark_init(&om);
-  Buffer out;
-  buf_init(&out, 65536);
-  char b[65536];
+  OctomarkParser parser;
+  octomark_init(&parser);
+  StringBuffer output;
+  string_buffer_init(&output, 65536);
+  char buffer[65536];
   size_t n;
-  while ((n = fread(b, 1, sizeof(b), stdin)) > 0) {
-    octomark_feed(&om, b, n, &out);
-    if (out.size > 0) {
-      fwrite(out.data, 1, out.size, stdout);
-      out.size = 0;
-      out.data[0] = '\0';
+  while ((n = fread(buffer, 1, sizeof(buffer), stdin)) > 0) {
+    octomark_feed(&parser, buffer, n, &output);
+    if (output.size > 0) {
+      fwrite(output.data, 1, output.size, stdout);
+      output.size = 0;
+      output.data[0] = '\0';
     }
   }
-  octomark_finish(&om, &out);
-  if (out.size > 0)
-    fwrite(out.data, 1, out.size, stdout);
-  buf_free(&out);
-  octomark_free(&om);
+  octomark_finish(&parser, &output);
+  if (output.size > 0)
+    fwrite(output.data, 1, output.size, stdout);
+  string_buffer_free(&output);
+  octomark_free(&parser);
   return 0;
 }
 #endif

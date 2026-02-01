@@ -55,20 +55,20 @@ To use OctoMark in your own project, include the logic from `octomark.c` (or def
 #include "octomark.c"
 
 int main() {
-    OctoMark om;
-    octomark_init(&om);
+    OctomarkParser parser;
+    octomark_init(&parser);
     
-    Buffer output;
-    buf_init(&output, 4096);
+    StringBuffer output;
+    string_buffer_init(&output, 4096);
     
     const char *chunk = "# Hello Octo\nStream data here.";
-    octomark_feed(&om, chunk, strlen(chunk), &output);
-    octomark_finish(&om, &output);
+    octomark_feed(&parser, chunk, strlen(chunk), &output);
+    octomark_finish(&parser, &output);
     
     printf("%s", output.data);
     
-    buf_free(&output);
-    octomark_free(&om);
+    string_buffer_free(&output);
+    octomark_free(&parser);
     return 0;
 }
 ```

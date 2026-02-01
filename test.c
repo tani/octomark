@@ -89,17 +89,17 @@ TestCase tests[] = {
 
 int main() {
   printf("--- OctoMark C Correctness Tests ---\n");
-  OctoMark om;
-  Buffer out;
-  buf_init(&out, 65536);
+  OctomarkParser parser;
+  StringBuffer out;
+  string_buffer_init(&out, 65536);
   int passed = 0;
   int total = sizeof(tests) / sizeof(TestCase);
 
   for (int i = 0; i < total; i++) {
-    octomark_init(&om);
+    octomark_init(&parser);
     out.size = 0;
-    octomark_feed(&om, tests[i].input, strlen(tests[i].input), &out);
-    octomark_finish(&om, &out);
+    octomark_feed(&parser, tests[i].input, strlen(tests[i].input), &out);
+    octomark_finish(&parser, &out);
 
     if (strcmp(out.data, tests[i].expected) == 0) {
       passed++;
@@ -108,10 +108,10 @@ int main() {
       printf("Expected: [%s]\n", tests[i].expected);
       printf("Actual:   [%s]\n", out.data);
     }
-    octomark_free(&om);
+    octomark_free(&parser);
   }
 
   printf("\nTest Summary: %d Passed, %d Failed.\n", passed, total - passed);
-  buf_free(&out);
+  string_buffer_free(&out);
   return (passed == total) ? 0 : 1;
 }
