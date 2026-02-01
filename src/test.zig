@@ -70,6 +70,8 @@ test "octomark cases" {
         tc("Space Hard Break", "Line 1  \nLine 2", "<p>Line 1<br>\nLine 2</p>\n", false),
         tc("Backslash Hard Break", "Line 1\\\nLine 2", "<p>Line 1<br>\nLine 2</p>\n", false),
         tc("HTML Support", "<b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> <invalid\nMixed with **Markdown**: <i>Italic</i> and `code`", "<p><b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> &lt;invalid\nMixed with <strong>Markdown</strong>: <i>Italic</i> and <code>code</code></p>\n", true),
+        tc("Strong Fallback", "**No Closing", "<p>**No Closing</p>\n", false),
+        tc("Emphasis Fallback", "_No Closing", "<p>_No Closing</p>\n", false),
     };
 
     const allocator = std.testing.allocator;
@@ -78,4 +80,66 @@ test "octomark cases" {
         defer allocator.free(output);
         try std.testing.expectEqualStrings(case.expected, output);
     }
+}
+
+test "NestingTooDeep" {
+    const allocator = std.testing.allocator;
+    var parser: octomark.OctomarkParser = undefined;
+    try parser.init(allocator);
+    defer parser.deinit(allocator);
+
+    var input = std.ArrayListUnmanaged(u8){};
+    defer input.deinit(allocator);
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        try input.appendSlice(allocator, "> ");
+    }
+    try input.appendSlice(allocator, "Deep");
+
+    var reader = std.io.Reader.fixed(input.items);
+    var writer_alloc = std.io.Writer.Allocating.init(allocator);
+    defer allocator.free(writer_alloc.writer.buffer);
+
+    const result = parser.parse(&reader, &writer_alloc.writer, allocator);
+    try std.testing.expectError(error.NestingTooDeep, result);
+}
+
+test "Table Column Limit (64)" {
+    const allocator = std.testing.allocator;
+    var parser: octomark.OctomarkParser = undefined;
+    try parser.init(allocator);
+    defer parser.deinit(allocator);
+
+    var input = std.ArrayListUnmanaged(u8){};
+    defer input.deinit(allocator);
+
+    // Header row with 100 columns
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        try input.appendSlice(allocator, "| H ");
+    }
+    try input.appendSlice(allocator, "|\n");
+
+    // Separator row with 100 columns
+    i = 0;
+    while (i < 100) : (i += 1) {
+        try input.appendSlice(allocator, "|---");
+    }
+    try input.appendSlice(allocator, "|\n");
+
+    var reader = std.io.Reader.fixed(input.items);
+    var writer_alloc = std.io.Writer.Allocating.init(allocator);
+    defer allocator.free(writer_alloc.writer.buffer);
+
+    try parser.parse(&reader, &writer_alloc.writer, allocator);
+
+    // Verify that we have exactly 64 <th> tags
+    const output = writer_alloc.writer.buffered();
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOf(u8, output[pos..], "<th>")) |index| {
+        count += 1;
+        pos += index + 4;
+    }
+    try std.testing.expectEqual(@as(usize, 64), count);
 }
