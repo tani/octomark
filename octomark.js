@@ -7,10 +7,12 @@ class OctoMark {
     constructor() {
         this.escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
         this.specialChars = new Uint8Array(256);
-        const specials = "\\['*`&<>\"_";
+        const specials = "\\['*`&<>\"_~!"; // Added ~ and !
         for (let i = 0; i < specials.length; i++) {
             this.specialChars[specials.charCodeAt(i)] = 1;
         }
+        // h for autolinks (http)
+        this.specialChars['h'.charCodeAt(0)] = 1;
     }
 
     escape(str) {
@@ -100,35 +102,52 @@ class OctoMark {
                 continue;
             }
 
-            // --- Unordered Lists ---
-            if (window[0] === '-' && window[1] === ' ') {
-                // Adjust list depth
+            // --- Lists (UL & OL) ---
+            const isUL = window[0] === '-' && window[1] === ' ';
+            const isOL = (window[0] >= '0' && window[0] <= '9') && window[1] === '.' && window[2] === ' ';
+
+            if (isUL || isOL) {
+                const listTag = isUL ? "ul" : "ol";
+
+                // Adjust list depth and type
                 while (listStack.length < indent + 1) {
-                    output += "<ul>\n";
-                    listStack.push(1);
+                    output += `<${listTag}>\n`;
+                    listStack.push(listTag);
                 }
                 while (listStack.length > indent + 1) {
-                    output += "</ul>\n";
-                    listStack.pop();
+                    const tag = listStack.pop();
+                    output += `</${tag}>\n`;
                 }
 
-                // Task list detection using window
-                const isTask = window[2] === '[' && (window[3] === ' ' || window[3] === 'x') && window[4] === ']';
+                // If type switches at the same level (e.g., from UL to OL)
+                if (listStack[listStack.length - 1] !== listTag) {
+                    const oldTag = listStack.pop();
+                    output += `</${oldTag}>\n<${listTag}>\n`;
+                    listStack.push(listTag);
+                }
 
-                if (isTask) {
-                    const isChecked = window[3] === 'x';
-                    const checkedAttr = isChecked ? "checked" : "";
-                    const taskContent = rel.substring(6); // "- [x] " is 6 chars
-                    output += `<li><input type="checkbox" ${checkedAttr} disabled> ${this.parseInline(taskContent)}</li>\n`;
+                if (isUL) {
+                    // Task list detection using window
+                    const isTask = window[2] === '[' && (window[3] === ' ' || window[3] === 'x') && window[4] === ']';
+                    if (isTask) {
+                        const isChecked = window[3] === 'x';
+                        const checkedAttr = isChecked ? "checked" : "";
+                        const taskContent = rel.substring(6); // "- [x] " is 6 chars
+                        output += `<li><input type="checkbox" ${checkedAttr} disabled> ${this.parseInline(taskContent)}</li>\n`;
+                    } else {
+                        output += `<li>${this.parseInline(rel.substring(2))}</li>\n`;
+                    }
                 } else {
-                    output += `<li>${this.parseInline(rel.substring(2))}</li>\n`;
+                    // Ordered List item
+                    const content = rel.substring(3);
+                    output += `<li>${this.parseInline(content)}</li>\n`;
                 }
                 continue;
             } else if (listStack.length) {
                 // Not a list item, close all open lists
                 while (listStack.length) {
-                    output += "</ul>\n";
-                    listStack.pop();
+                    const tag = listStack.pop();
+                    output += `</${tag}>\n`;
                 }
             }
 
@@ -216,8 +235,8 @@ class OctoMark {
 
         // Cleanup
         while (listStack.length) {
-            output += "</ul>\n";
-            listStack.pop();
+            const tag = listStack.pop();
+            output += `</${tag}>\n`;
         }
         if (inTable) {
             output += "</tbody></table>\n";
@@ -268,16 +287,23 @@ class OctoMark {
                 continue;
             }
 
-            // Links [text](url)
-            if (char === '[') {
-                let closeBracket = text.indexOf(']', i + 1);
+            // Links [text](url) or Images ![text](url)
+            if (char === '[' || (char === '!' && peek[1] === '[')) {
+                const isImage = char === '!';
+                const offset = isImage ? 1 : 0;
+                let closeBracket = text.indexOf(']', i + offset + 1);
+
                 if (closeBracket !== -1 && text[closeBracket + 1] === '(') {
                     let closeParen = text.indexOf(')', closeBracket + 2);
                     if (closeParen !== -1) {
                         const url = text.substring(closeBracket + 2, closeParen);
                         if (url.indexOf(' ') === -1 && url.indexOf('\t') === -1) {
-                            const linkText = text.substring(i + 1, closeBracket);
-                            res += `<a href="${this.escape(url)}">${this.parseInline(linkText)}</a>`;
+                            const linkText = text.substring(i + offset + 1, closeBracket);
+                            if (isImage) {
+                                res += `<img src="${this.escape(url)}" alt="${this.escape(linkText)}">`;
+                            } else {
+                                res += `<a href="${this.escape(url)}">${this.parseInline(linkText)}</a>`;
+                            }
                             i = closeParen + 1;
                             continue;
                         }
@@ -285,13 +311,16 @@ class OctoMark {
                 }
             }
 
-            // Bold **text** (Peek helps here)
-            if (char === '*' && peek[1] === '*') {
-                let closeBold = text.indexOf('**', i + 2);
-                if (closeBold !== -1) {
-                    const boldText = text.substring(i + 2, closeBold);
-                    res += `<strong>${this.parseInline(boldText)}</strong>`;
-                    i = closeBold + 2;
+            // Bold **text** or Strikethrough ~~text~~
+            if ((char === '*' && peek[1] === '*') || (char === '~' && peek[1] === '~')) {
+                const marker = char === '*' ? '**' : '~~';
+                const tag = char === '*' ? 'strong' : 'del';
+                let closeMarker = text.indexOf(marker, i + 2);
+
+                if (closeMarker !== -1) {
+                    const innerText = text.substring(i + 2, closeMarker);
+                    res += `<${tag}>${this.parseInline(innerText)}</${tag}>`;
+                    i = closeMarker + 2;
                     continue;
                 }
             }
@@ -315,6 +344,28 @@ class OctoMark {
                     res += `<code>${this.escape(codeText)}</code>`;
                     i = closeCode + 1;
                     continue;
+                }
+            }
+
+            // Autolinks (http:// or https://)
+            if (char === 'h' && peek.startsWith('http')) {
+                let isFull = false;
+                if (peek.startsWith('http://')) isFull = true;
+                else if (peek.startsWith('https://')) isFull = true;
+
+                if (isFull) {
+                    let k = i;
+                    while (k < len) {
+                        const c = text[k];
+                        if (c === ' ' || c === '\t' || c === '<' || c === '>' || c === '"' || c === "'" || c === '[' || c === ']' || c === '(' || c === ')') break;
+                        k++;
+                    }
+                    if (k > i + 7) {
+                        const url = text.substring(i, k);
+                        res += `<a href="${this.escape(url)}">${this.escape(url)}</a>`;
+                        i = k;
+                        continue;
+                    }
                 }
             }
 

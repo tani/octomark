@@ -91,6 +91,31 @@ const tests = [
         expected: "<ul>\n<li>Regular</li>\n<li><input type=\"checkbox\"  disabled> Task</li>\n</ul>\n"
     },
     {
+        name: "Ordered List",
+        input: "1. Item 1\n2. Item 2",
+        expected: "<ol>\n<li>Item 1</li>\n<li>Item 2</li>\n</ol>\n"
+    },
+    {
+        name: "Image",
+        input: "![Octo](https://octo.com/logo.png)",
+        expected: '<p><img src="https://octo.com/logo.png" alt="Octo"></p>\n'
+    },
+    {
+        name: "Strikethrough",
+        input: "~~Deleted text~~",
+        expected: "<p><del>Deleted text</del></p>\n"
+    },
+    {
+        name: "Autolink",
+        input: "Search on https://google.com now",
+        expected: '<p>Search on <a href="https://google.com">https://google.com</a> now</p>\n'
+    },
+    {
+        name: "Mixed List Transformation",
+        input: "- Bullet\n1. Numbered",
+        expected: "<ul>\n<li>Bullet</li>\n</ul>\n<ol>\n<li>Numbered</li>\n</ol>\n"
+    },
+    {
         name: "Linear Paragraphs",
         input: "Line 1\nLine 2",
         expected: "<p>Line 1</p>\n<p>Line 2</p>\n"
