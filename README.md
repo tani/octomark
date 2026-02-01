@@ -62,25 +62,31 @@ constructs.
 
 ### Integration
 
-To use OctoMark in your own Zig project, import the module and drive the parser with a `FastWriter`.
+To use OctoMark in your own Zig project, import the module and drive the parser with a standard `std.io.Reader` and `std.io.Writer`.
 
 ```zig
 const std = @import("std");
 const octomark = @import("octomark");
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
     var parser: octomark.OctomarkParser = undefined;
     try parser.init(allocator);
     defer parser.deinit(allocator);
 
-    var out_buf: [64 * 1024]u8 = undefined;
-    var writer = octomark.FastWriter.fromStdout(&out_buf);
+    const stdout = std.io.getStdOut();
+    var buffered_writer = std.io.bufferedWriter(stdout.writer());
+    const writer = buffered_writer.writer();
 
     const input = "# Hello Octo\nStream data here.";
-    try parser.feed(input, &writer, allocator);
-    try parser.finish(&writer);
-    try writer.flush();
+    var input_stream = std.io.fixedBufferStream(input);
+    const reader = input_stream.reader();
+
+    try parser.parse(reader.any(), writer.any(), allocator);
+    try buffered_writer.flush();
 }
 ```
 

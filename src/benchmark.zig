@@ -37,19 +37,15 @@ pub fn main() !void {
         try parser.init(allocator);
         defer parser.deinit(allocator);
 
-        var writer_buffer: [64 * 1024]u8 = undefined;
-        var writer = octomark.FastWriter.init(null_file, &writer_buffer);
+        var out_buf: [4096]u8 = undefined;
+        var stdout_writer = null_file.writer(&out_buf);
+        const writer = &stdout_writer.interface;
 
         var timer = try std.time.Timer.start();
-        const chunk_size: usize = 64 * 1024;
-        var pos: usize = 0;
-        while (pos < total_size) {
-            const rem = total_size - pos;
-            const n = if (rem > chunk_size) chunk_size else rem;
-            try parser.feed(data[pos .. pos + n], &writer, allocator);
-            pos += n;
-        }
-        try parser.finish(&writer);
+
+        var reader = std.io.Reader.fixed(data);
+
+        try parser.parse(&reader, writer, allocator);
         try writer.flush();
 
         const elapsed_ns = timer.read();

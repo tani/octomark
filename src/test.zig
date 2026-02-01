@@ -13,27 +13,21 @@ fn tc(name: []const u8, input: []const u8, expected: []const u8, enable_html: bo
 }
 
 fn render(allocator: std.mem.Allocator, input: []const u8, enable_html: bool) ![]u8 {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var file = try tmp.dir.createFile("out.html", .{ .read = true, .truncate = true });
-    defer file.close();
-
-    var writer_buffer: [64 * 1024]u8 = undefined;
-    var writer = octomark.FastWriter.init(file, &writer_buffer);
-
     var parser: octomark.OctomarkParser = undefined;
     try parser.init(allocator);
     defer parser.deinit(allocator);
     parser.setOptions(.{ .enable_html = enable_html });
 
-    try parser.feed(input, &writer, allocator);
-    try parser.finish(&writer);
-    try writer.flush();
+    var reader = std.io.Reader.fixed(input);
+    var writer_alloc = std.io.Writer.Allocating.init(allocator);
+    defer allocator.free(writer_alloc.writer.buffer);
 
-    try file.seekTo(0);
-    const max_size = input.len * 8 + 1024;
-    return try file.readToEndAlloc(allocator, max_size);
+    try parser.parse(&reader, &writer_alloc.writer, allocator);
+
+    const result = writer_alloc.writer.buffered();
+    const final = try allocator.alloc(u8, result.len);
+    @memcpy(final, result);
+    return final;
 }
 
 test "octomark cases" {
