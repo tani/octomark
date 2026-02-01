@@ -116,6 +116,16 @@ const tests = [
         expected: "<ul>\n<li>Bullet</li>\n</ul>\n<ol>\n<li>Numbered</li>\n</ol>\n"
     },
     {
+        name: "Block Math",
+        input: "$$\nx^2 + y^2 = z^2\n$$",
+        expected: '<div class="math">x^2 + y^2 = z^2\n</div>\n'
+    },
+    {
+        name: "Inline Math",
+        input: "The formula is $E=mc^2$ is famous.",
+        expected: '<p>The formula is <span class="math">E=mc^2</span> is famous.</p>\n'
+    },
+    {
         name: "Linear Paragraphs",
         input: "Line 1\nLine 2",
         expected: "<p>Line 1</p>\n<p>Line 2</p>\n"

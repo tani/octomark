@@ -7,7 +7,7 @@ class OctoMark {
     constructor() {
         this.escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
         this.specialChars = new Uint8Array(256);
-        const specials = "\\['*`&<>\"_~!"; // Added ~ and !
+        const specials = "\\['*`&<>\"_~!$"; // Added $
         for (let i = 0; i < specials.length; i++) {
             this.specialChars[specials.charCodeAt(i)] = 1;
         }
@@ -34,6 +34,7 @@ class OctoMark {
     parse(input) {
         let output = "";
         let inCodeBlock = false;
+        let inMathBlock = false;
         let inTable = false;
         let tableAligns = [];
         let listStack = [];
@@ -94,6 +95,26 @@ class OctoMark {
                     output += "</code></pre>\n";
                 }
                 inCodeBlock = !inCodeBlock;
+                continue;
+            }
+
+            // --- Block Math ($$) ---
+            if (window[0] === '$' && window[1] === '$') {
+                if (inTable) {
+                    output += "</tbody></table>\n";
+                    inTable = false;
+                }
+                if (!inMathBlock) {
+                    output += '<div class="math">';
+                } else {
+                    output += "</div>\n";
+                }
+                inMathBlock = !inMathBlock;
+                continue;
+            }
+
+            if (inMathBlock) {
+                output += this.escape(line) + "\n";
                 continue;
             }
 
@@ -241,6 +262,9 @@ class OctoMark {
         if (inTable) {
             output += "</tbody></table>\n";
         }
+        if (inMathBlock) {
+            output += "</div>\n";
+        }
 
         return output;
     }
@@ -343,6 +367,17 @@ class OctoMark {
                     const codeText = text.substring(i + 1, closeCode);
                     res += `<code>${this.escape(codeText)}</code>`;
                     i = closeCode + 1;
+                    continue;
+                }
+            }
+
+            // Inline Math $text$
+            if (char === '$') {
+                let closeMath = text.indexOf('$', i + 1);
+                if (closeMath !== -1) {
+                    const mathText = text.substring(i + 1, closeMath);
+                    res += `<span class="math">${this.escape(mathText)}</span>`;
+                    i = closeMath + 1;
                     continue;
                 }
             }
