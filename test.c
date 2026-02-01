@@ -72,7 +72,20 @@ TestCase tests[] = {
      "<ul>\n<li>Bullet</li>\n</ul>\n<ol>\n<li>Numbered</li>\n</ol>\n"},
     {"Inline Math", "The formula is $E=mc^2$ is famous.",
      "<p>The formula is <span class=\"math\">E=mc^2</span> is famous.</p>\n"},
-    {"Linear Paragraphs", "Line 1\nLine 2", "<p>Line 1\nLine 2</p>\n"}};
+    {"Linear Paragraphs", "Line 1\nLine 2", "<p>Line 1\nLine 2</p>\n"},
+    {"Lazy Blockquote", "> Line 1\nLine 2",
+     "<blockquote><p>Line 1\nLine 2</p>\n</blockquote>\n"},
+    {"Lazy Blockquote Break", "> Line 1\n## Header",
+     "<blockquote><p>Line 1</p>\n</blockquote>\n<h2>Header</h2>\n"},
+    {"Lazy List Continuation", "- Item 1\nContinued",
+     "<ul>\n<li>Item 1\nContinued</li>\n</ul>\n"},
+    {"Indented List Continuation", "- Item 1\n  Continued",
+     "<ul>\n<li>Item 1\nContinued</li>\n</ul>\n"},
+    {"Definition List Continuation", "Term\n: Def 1\n  Continued",
+     "<dl>\n<dt>Term</dt>\n<dd>Def 1\nContinued</dd>\n</dl>\n"},
+    {"Space Hard Break", "Line 1  \nLine 2", "<p>Line 1<br>\nLine 2</p>\n"},
+    {"Backslash Hard Break", "Line 1\\\nLine 2",
+     "<p>Line 1<br>\nLine 2</p>\n"}};
 
 int main() {
   printf("--- OctoMark C Correctness Tests ---\n");

@@ -137,8 +137,11 @@ void parse_inline(const OctoMark *restrict om, const char *restrict text,
   size_t i = 0;
   while (i < len) {
     char c = text[i];
-    if (c == '\\' && i + 1 < len) {
-      buf_push(out, text[++i]);
+    if (c == '\\') {
+      if (i + 1 < len)
+        buf_push(out, text[++i]);
+      else
+        buf_append(out, "<br>");
     } else if ((c == '*' || c == '_') && i + 1 < len) {
       int n = 1;
       while (i + n < len && text[i + n] == c)
@@ -354,6 +357,33 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       rlen--;
     }
   }
+  // Lazy blockquote continuation: if we are in a paragraph and this line
+  // doesn't start a new block, keep the current quote level
+  size_t cur_ql = 0;
+  for (size_t k = 0; k < om->stack_size; k++)
+    if (om->stack[k].type == T_QUOTE)
+      cur_ql++;
+  if (ql < cur_ql && om->in_p) {
+    size_t ti = 0;
+    while (ti < rlen && rel[ti] == ' ')
+      ti++;
+    bool is_b = (rlen - ti >= 3 && strncmp(rel + ti, "```", 3) == 0) ||
+                (rlen - ti >= 2 && rel[ti] == '$' && rel[ti + 1] == '$') ||
+                (rlen - ti >= 1 && rel[ti] == '#') ||
+                (rlen - ti >= 1 && rel[ti] == ':') ||
+                (rlen - ti >= 2 && rel[ti] == '-' && rel[ti + 1] == ' ') ||
+                (rlen - ti >= 3 && isdigit(rel[ti]) && rel[ti + 1] == '.' &&
+                 rel[ti + 2] == ' ') ||
+                (rlen - ti >= 3 && (strncmp(rel + ti, "---", 3) == 0 ||
+                                    strncmp(rel + ti, "***", 3) == 0 ||
+                                    strncmp(rel + ti, "___", 3) == 0));
+    if (!is_b)
+      ql = cur_ql;
+  }
+
+  if (om->stack_size > 0 &&
+      (om->stack[om->stack_size - 1].type == T_QUOTE && ql < om->stack_size))
+    close_p(om, out);
   while (om->stack_size > 0 &&
          (om->stack[om->stack_size - 1].type == T_QUOTE && ql < om->stack_size))
     pop(om, out);
@@ -588,7 +618,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   if (!om->in_p && !in_c) {
     buf_append(out, "<p>");
     om->in_p = true;
-  } else if (om->in_p)
+  } else if (om->in_p || (in_c && !is_u && !is_o && !hdd))
     buf_push(out, '\n');
   bool br = (rlen >= 2 && rel[rlen - 1] == ' ' && rel[rlen - 2] == ' ');
   parse_inline(om, rel, br ? rlen - 2 : rlen, out);
