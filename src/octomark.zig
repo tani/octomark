@@ -297,6 +297,7 @@ fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *
             while (i + backtick_count < length and text[i + backtick_count] == '`') : (backtick_count += 1) {}
             try output.writeAll("<code>");
             const content_start = i + backtick_count;
+            var found = false;
             while (i + backtick_count < length) {
                 i += 1;
                 var match = true;
@@ -307,11 +308,19 @@ fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *
                         break;
                     }
                 }
-                if (match) break;
+                if (match) {
+                    found = true;
+                    break;
+                }
             }
-            if (i > content_start) try appendEscapedText(parser, text[content_start..i], output);
-            try output.writeAll("</code>");
-            i += backtick_count - 1;
+            if (found) {
+                if (i > content_start) try appendEscapedText(parser, text[content_start..i], output);
+                try output.writeAll("</code>");
+                i += backtick_count - 1;
+            } else {
+                try output.writeAll("</code>");
+                i = content_start - 1;
+            }
         } else if (c == '~' and i + 1 < length and text[i + 1] == '~') {
             try output.writeAll("<del>");
             i += 2;
@@ -432,16 +441,15 @@ fn processLeafBlockContinuation(parser: *OctomarkParser, line: []const u8, outpu
     const top = currentBlockType(parser);
     if (top != .code and top != .math) return false;
 
-    var trim_start: usize = 0;
-    while (trim_start < line.len and std.ascii.isWhitespace(line[trim_start])) : (trim_start += 1) {}
+    const trimmed = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
 
     if (top == .code) {
-        if (line.len - trim_start >= 3 and std.mem.eql(u8, line[trim_start .. trim_start + 3], "```")) {
+        if (trimmed.len >= 3 and std.mem.eql(u8, trimmed[0..3], "```")) {
             try renderAndCloseTopBlock(parser, output);
             return true;
         }
     } else {
-        if (line.len - trim_start >= 2 and std.mem.eql(u8, line[trim_start .. trim_start + 2], "$$")) {
+        if (trimmed.len >= 2 and std.mem.eql(u8, trimmed[0..2], "$$")) {
             try renderAndCloseTopBlock(parser, output);
             return true;
         }
@@ -516,13 +524,12 @@ fn tryParseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, le
         line = line[1..];
         if (line.len > 0 and line[0] == ' ') line = line[1..];
         try closeParagraphIfOpen(parser, output);
-        var in_dl = false;
-        var in_dd = false;
-        var k: usize = 0;
-        while (k < parser.stack_depth) : (k += 1) {
-            if (parser.block_stack[k].block_type == .definition_list) in_dl = true;
-            if (parser.block_stack[k].block_type == .definition_description) in_dd = true;
-        }
+    var in_dl = false;
+    var in_dd = false;
+    for (parser.block_stack[0..parser.stack_depth]) |entry| {
+        if (entry.block_type == .definition_list) in_dl = true;
+        if (entry.block_type == .definition_description) in_dd = true;
+    }
         if (!in_dl) {
             try output.writeAll("<dl>\n");
             pushBlock(parser, .definition_list, @intCast(leading_spaces));
@@ -542,8 +549,8 @@ fn tryParseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, le
 
 fn tryParseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: *FastWriter) ParseError!bool {
     var line = line_content.*;
-    var internal_spaces: usize = 0;
-    while (internal_spaces < line.len and line[internal_spaces] == ' ') : (internal_spaces += 1) {}
+    const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
+    const internal_spaces: usize = line.len - trimmed_line.len;
 
     const is_ul = (line.len - internal_spaces >= 2 and std.mem.eql(u8, line[internal_spaces .. internal_spaces + 2], "- "));
     const is_ol = (line.len - internal_spaces >= 3 and std.ascii.isDigit(line[internal_spaces]) and
@@ -590,9 +597,8 @@ fn tryParseTable(parser: *OctomarkParser, line_content: []const u8, full_data: [
                 if (next_newline) |offset| {
                     const nl = current_pos + offset;
                     const lookahead = full_data[current_pos..nl];
-                    var la_spaces: usize = 0;
-                    while (la_spaces < lookahead.len and lookahead[la_spaces] == ' ') : (la_spaces += 1) {}
-                    if (la_spaces < lookahead.len and lookahead[la_spaces] == '|') {
+                    const trimmed = std.mem.trimLeft(u8, lookahead, &std.ascii.whitespace);
+                    if (trimmed.len > 0 and trimmed[0] == '|') {
                         try closeLeafBlocks(parser, output);
                         try output.writeAll("<table><thead><tr>");
                         parser.table_column_count = 0;
@@ -679,9 +685,8 @@ fn tryParseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, ful
         const next_newline = std.mem.indexOfScalar(u8, full_data[current_pos..], '\n');
         if (next_newline) |offset| {
             const nl = current_pos + offset;
-            var p = current_pos;
-            while (p < nl and std.ascii.isWhitespace(full_data[p])) : (p += 1) {}
-            if (p < nl and full_data[p] == ':') {
+            const trimmed = std.mem.trimLeft(u8, full_data[current_pos..nl], &std.ascii.whitespace);
+            if (trimmed.len > 0 and trimmed[0] == ':') {
                 try closeLeafBlocks(parser, output);
                 if (parser.stack_depth == 0 or currentBlockType(parser) != .definition_list) {
                     try output.writeAll("<dl>\n");
@@ -717,9 +722,9 @@ fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bo
 fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []const u8, current_pos: usize, output: *FastWriter) ParseError!bool {
     if (try processLeafBlockContinuation(parser, line, output)) return false;
 
-    var leading_spaces: usize = 0;
-    while (leading_spaces < line.len and line[leading_spaces] == ' ') : (leading_spaces += 1) {}
-    var line_content = line[leading_spaces..];
+    const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
+    const leading_spaces: usize = line.len - trimmed_line.len;
+    var line_content = trimmed_line;
 
     if (line_content.len == 0) {
         try closeLeafBlocks(parser, output);
@@ -737,15 +742,13 @@ fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []con
     }
 
     var current_quote_level: usize = 0;
-    var k: usize = 0;
-    while (k < parser.stack_depth) : (k += 1) {
-        if (parser.block_stack[k].block_type == .blockquote) current_quote_level += 1;
+    for (parser.block_stack[0..parser.stack_depth]) |entry| {
+        if (entry.block_type == .blockquote) current_quote_level += 1;
     }
 
     if (quote_level < current_quote_level and currentBlockType(parser) == .paragraph) {
-        var ti: usize = 0;
-        while (ti < line_content.len and line_content[ti] == ' ') : (ti += 1) {}
-        if (!isBlockStartMarker(line_content[ti..])) quote_level = current_quote_level;
+        const trimmed_for_block = std.mem.trimLeft(u8, line_content, &std.ascii.whitespace);
+        if (!isBlockStartMarker(trimmed_for_block)) quote_level = current_quote_level;
     }
 
     while (current_quote_level > quote_level) {

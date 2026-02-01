@@ -348,6 +348,7 @@ static void parse_inline_content(const OctomarkParser *restrict parser,
         backtick_count++;
       string_buffer_append_string(output, "<code>");
       size_t content_start = i + backtick_count;
+      bool found = false;
       while (i + backtick_count < length) {
         i++;
         bool match = true;
@@ -356,13 +357,20 @@ static void parse_inline_content(const OctomarkParser *restrict parser,
             match = false;
             break;
           }
-        if (match)
+        if (match) {
+          found = true;
           break;
+        }
       }
-      append_escaped_text(parser, text + content_start, i - content_start,
-                          output);
-      string_buffer_append_string(output, "</code>");
-      i += backtick_count - 1;
+      if (found) {
+        append_escaped_text(parser, text + content_start, i - content_start,
+                            output);
+        string_buffer_append_string(output, "</code>");
+        i += backtick_count - 1;
+      } else {
+        string_buffer_append_string(output, "</code>");
+        i = content_start - 1;
+      }
     } else if (c == '~' && i + 1 < length && text[i + 1] == '~') {
       string_buffer_append_string(output, "<del>");
       i += 2;
