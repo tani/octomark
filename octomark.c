@@ -1,3 +1,6 @@
+#ifndef OCTOMARK_C
+#define OCTOMARK_C
+
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -7,7 +10,10 @@
 #include <time.h>
 
 /**
- * OctoMark Native C99 Edition (Streaming & Buffer Passing)
+ * OctoMark Native C99 (Turbo Edition)
+ * - Restrict pointers for better vectorization.
+ * - Stack-based metadata (no malloc for lists/tables).
+ * - Advanced SWAR bit-masking for plain text scanning.
  */
 
 // --- Dynamic Buffer Implementation ---
@@ -25,7 +31,7 @@ void buf_init(Buffer *b, size_t initial_cap) {
     b->data[0] = '\0';
 }
 
-void buf_grow(Buffer *b, size_t needed) {
+static inline void buf_grow(Buffer *restrict b, size_t needed) {
   if (b->size + needed + 1 > b->capacity) {
     size_t new_cap = b->capacity * 2;
     if (new_cap < b->size + needed + 1)
@@ -35,7 +41,8 @@ void buf_grow(Buffer *b, size_t needed) {
   }
 }
 
-void buf_append_n(Buffer *b, const char *s, size_t n) {
+static inline void buf_append_n(Buffer *restrict b, const char *restrict s,
+                                size_t n) {
   if (!s || n == 0)
     return;
   buf_grow(b, n);
@@ -44,40 +51,33 @@ void buf_append_n(Buffer *b, const char *s, size_t n) {
   b->data[b->size] = '\0';
 }
 
-void buf_append(Buffer *b, const char *s) {
+static inline void buf_append(Buffer *restrict b, const char *restrict s) {
   if (!s)
     return;
   buf_append_n(b, s, strlen(s));
 }
 
-void buf_push(Buffer *b, char c) {
+static inline void buf_push(Buffer *restrict b, char c) {
   buf_grow(b, 1);
   b->data[b->size++] = c;
   b->data[b->size] = '\0';
 }
 
 void buf_free(Buffer *b) {
-  free(b->data);
+  if (b->data)
+    free(b->data);
   b->data = NULL;
   b->size = b->capacity = 0;
 }
 
-// --- List Stack ---
+// --- List Stack (Fixed size for performance) ---
+#define MAX_LIST_DEPTH 32
 typedef struct {
-  int *types; // 0 for ul, 1 for ol
+  int types[MAX_LIST_DEPTH]; // 0 for ul, 1 for ol
   size_t size;
-  size_t capacity;
 } ListStack;
 
-void list_push(ListStack *s, int type) {
-  if (s->size == s->capacity) {
-    s->capacity = s->capacity ? s->capacity * 2 : 8;
-    s->types = (int *)realloc(s->types, s->capacity * sizeof(int));
-  }
-  s->types[s->size++] = type;
-}
-
-int list_pop(ListStack *s) { return s->size > 0 ? s->types[--s->size] : -1; }
+typedef enum { ALIGN_NONE, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } Align;
 
 // --- OctoMark State ---
 typedef struct {
@@ -86,44 +86,31 @@ typedef struct {
   bool in_code;
   bool in_math;
   bool in_table;
-  char *table_aligns[64]; // Simplified fixed max columns
+  Align table_aligns[64];
   size_t table_cols;
   ListStack list_stack;
   Buffer leftover;
 } OctoMark;
 
 void octomark_init(OctoMark *om) {
-  memset(om->special_chars, 0, 256);
-  memset(om->escape_table, 0, 256 * sizeof(char *));
-
+  memset(om, 0, sizeof(OctoMark));
   const char *specs = "\\['*`&<>\"_~!$";
   for (int i = 0; specs[i]; i++)
     om->special_chars[(unsigned char)specs[i]] = true;
   om->special_chars['h'] = true;
-
   om->escape_table['&'] = "&amp;";
   om->escape_table['<'] = "&lt;";
   om->escape_table['>'] = "&gt;";
   om->escape_table['"'] = "&quot;";
   om->escape_table['\''] = "&#39;";
-
-  om->in_code = false;
-  om->in_math = false;
-  om->in_table = false;
-  om->table_cols = 0;
-  om->list_stack.types = NULL;
-  om->list_stack.size = om->list_stack.capacity = 0;
   buf_init(&om->leftover, 1024);
 }
 
-void octomark_free(OctoMark *om) {
-  buf_free(&om->leftover);
-  free(om->list_stack.types);
-  for (size_t i = 0; i < om->table_cols; i++)
-    free(om->table_aligns[i]);
-}
+void octomark_free(OctoMark *om) { buf_free(&om->leftover); }
 
-void escape_buf(const OctoMark *om, const char *str, size_t len, Buffer *out) {
+static inline void escape_buf(const OctoMark *restrict om,
+                              const char *restrict str, size_t len,
+                              Buffer *restrict out) {
   for (size_t i = 0; i < len; i++) {
     const char *esc = om->escape_table[(unsigned char)str[i]];
     if (esc)
@@ -133,42 +120,58 @@ void escape_buf(const OctoMark *om, const char *str, size_t len, Buffer *out) {
   }
 }
 
-void parse_inline(const OctoMark *om, const char *text, size_t len,
-                  Buffer *out);
+void parse_inline(const OctoMark *restrict om, const char *restrict text,
+                  size_t len, Buffer *restrict out);
 
-// Forward declaration needed for recursion
-void parse_inline(const OctoMark *om, const char *text, size_t len,
-                  Buffer *out) {
+static inline int find_special_swar(const OctoMark *restrict om,
+                                    const char *restrict text, size_t len) {
+  size_t i = 0;
+  while (i + 7 < len) {
+    uint64_t word;
+    memcpy(&word, text + i, 8);
+    uint64_t specials = 0;
+    specials |= (uint64_t)om->special_chars[(word >> 0) & 0xFF] << 0;
+    specials |= (uint64_t)om->special_chars[(word >> 8) & 0xFF] << 8;
+    specials |= (uint64_t)om->special_chars[(word >> 16) & 0xFF] << 16;
+    specials |= (uint64_t)om->special_chars[(word >> 24) & 0xFF] << 24;
+    specials |= (uint64_t)om->special_chars[(word >> 32) & 0xFF] << 32;
+    specials |= (uint64_t)om->special_chars[(word >> 40) & 0xFF] << 40;
+    specials |= (uint64_t)om->special_chars[(word >> 48) & 0xFF] << 48;
+    specials |= (uint64_t)om->special_chars[(word >> 56) & 0xFF] << 56;
+    if (specials) {
+      for (int k = 0; k < 8; k++) {
+        if (om->special_chars[(unsigned char)text[i + k]])
+          return (int)(i + k);
+      }
+    }
+    i += 8;
+  }
+  while (i < len) {
+    if (om->special_chars[(unsigned char)text[i]])
+      return (int)i;
+    i++;
+  }
+  return -1;
+}
+
+void parse_inline(const OctoMark *restrict om, const char *restrict text,
+                  size_t len, Buffer *restrict out) {
   size_t i = 0;
   while (i < len) {
-    size_t start = i;
-    // SWAR Jump Scan (64-bit)
-    while (i + 7 < len) {
-      uint64_t word;
-      memcpy(&word, text + i, 8);
-      if (om->special_chars[(word >> 0) & 0xFF] ||
-          om->special_chars[(word >> 8) & 0xFF] ||
-          om->special_chars[(word >> 16) & 0xFF] ||
-          om->special_chars[(word >> 24) & 0xFF] ||
-          om->special_chars[(word >> 32) & 0xFF] ||
-          om->special_chars[(word >> 40) & 0xFF] ||
-          om->special_chars[(word >> 48) & 0xFF] ||
-          om->special_chars[(word >> 56) & 0xFF])
-        break;
-      i += 8;
-    }
-    while (i < len && !om->special_chars[(unsigned char)text[i]])
-      i++;
-    if (i > start)
-      buf_append_n(out, text + start, i - start);
-    if (i >= len)
+    int next_special = find_special_swar(om, text + i, len - i);
+    if (next_special == -1) {
+      buf_append_n(out, text + i, len - i);
       break;
+    }
+    if (next_special > 0) {
+      buf_append_n(out, text + i, next_special);
+      i += next_special;
+    }
 
     char c = text[i];
     size_t rem = len - i;
 
-    // Escaping
-    if (c == '\\' && i + 1 < len) {
+    if (c == '\\' && rem > 1) {
       char escaped = text[i + 1];
       const char *esc = om->escape_table[(unsigned char)escaped];
       if (esc)
@@ -179,7 +182,6 @@ void parse_inline(const OctoMark *om, const char *text, size_t len,
       continue;
     }
 
-    // Links/Images
     if (c == '[' || (c == '!' && rem > 1 && text[i + 1] == '[')) {
       bool img = (c == '!');
       size_t off = img ? 1 : 0;
@@ -203,8 +205,7 @@ void parse_inline(const OctoMark *om, const char *text, size_t len,
               escape_buf(om, close_b + 2, url_len, out);
               buf_append(out, "\" alt=\"");
               escape_buf(om, text + i + 2, close_b - (text + i + 2), out);
-              buf_push(out, '\"');
-              buf_push(out, '>');
+              buf_append(out, "\">");
             } else {
               buf_append(out, "<a href=\"");
               escape_buf(om, close_b + 2, url_len, out);
@@ -219,27 +220,25 @@ void parse_inline(const OctoMark *om, const char *text, size_t len,
       }
     }
 
-    // Bold/Strikethrough
     if ((c == '*' && rem > 1 && text[i + 1] == '*') ||
         (c == '~' && rem > 1 && text[i + 1] == '~')) {
       const char *tag = (c == '*') ? "strong" : "del";
       const char *marker = (c == '*') ? "**" : "~~";
-      const char *close = strstr(
-          text + i + 2, marker); // Simple search for demo, real one needs limit
+      const char *search_start = text + i + 2;
+      const char *close = strstr(search_start, marker);
       if (close && (size_t)(close - text) < len) {
-        buf_push(out, '<');
+        buf_append_n(out, "<", 1);
         buf_append(out, tag);
-        buf_push(out, '>');
+        buf_append_n(out, ">", 1);
         parse_inline(om, text + i + 2, close - (text + i + 2), out);
-        buf_append(out, "</");
+        buf_append_n(out, "</", 2);
         buf_append(out, tag);
-        buf_push(out, '>');
+        buf_append_n(out, ">", 1);
         i = close - text + 2;
         continue;
       }
     }
 
-    // Others (Italic, Code, Math...)
     if (c == '_') {
       const char *close =
           (const char *)memchr(text + i + 1, '_', len - (i + 1));
@@ -302,26 +301,27 @@ void parse_inline(const OctoMark *om, const char *text, size_t len,
   }
 }
 
-void process_line(OctoMark *om, const char *line, size_t len, const char *full,
-                  size_t next_pos, Buffer *out) {
-  size_t t_start = 0;
-  while (t_start < len && isspace(line[t_start]))
-    t_start++;
-  size_t t_end = len;
-  while (t_end > t_start && isspace(line[t_end - 1]))
-    t_end--;
-  bool empty = (t_start == t_end);
+bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
+                  const char *restrict full, size_t next_pos,
+                  Buffer *restrict out) {
+  size_t t_s = 0;
+  while (t_s < len && isspace(line[t_s]))
+    t_s++;
+  size_t t_e = len;
+  while (t_e > t_s && isspace(line[t_e - 1]))
+    t_e--;
+  bool empty = (t_s == t_e);
 
   if (!om->in_code && empty) {
     while (om->list_stack.size > 0) {
-      int t = list_pop(&om->list_stack);
+      int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
     }
-    return;
+    return false;
   }
 
   size_t indent = 0;
@@ -332,10 +332,9 @@ void process_line(OctoMark *om, const char *line, size_t len, const char *full,
   const char *rel = line + indent * 4;
   size_t rlen = len - indent * 4;
 
-  // Fenced Code
   if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
     while (om->list_stack.size > 0) {
-      int t = list_pop(&om->list_stack);
+      int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
     if (om->in_table) {
@@ -350,70 +349,67 @@ void process_line(OctoMark *om, const char *line, size_t len, const char *full,
       if (lang_len > 0) {
         buf_append(out, " class=\"language-");
         escape_buf(om, rel + 3, lang_len, out);
-        buf_push(out, '\"');
+        buf_append(out, "\"");
       }
-      buf_push(out, '>');
+      buf_append(out, ">");
     } else
       buf_append(out, "</code></pre>\n");
     om->in_code = !om->in_code;
-    return;
+    return false;
   }
 
-  // Block Math
   if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
     }
-    if (!om->in_math)
-      buf_append(out, "<div class=\"math\">");
-    else
-      buf_append(out, "</div>\n");
+    buf_append(out, om->in_math ? "</div>\n" : "<div class=\"math\">");
     om->in_math = !om->in_math;
-    return;
+    return false;
   }
 
   if (om->in_math || om->in_code) {
     escape_buf(om, line, len, out);
     buf_push(out, '\n');
-    return;
+    return false;
   }
 
-  // Lists
   bool is_ul = (rlen >= 2 && rel[0] == '-' && rel[1] == ' ');
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
     int tag_type = is_ul ? 0 : 1;
-    while (om->list_stack.size < indent + 1) {
+    while (om->list_stack.size < indent + 1 &&
+           om->list_stack.size < MAX_LIST_DEPTH) {
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
-      list_push(&om->list_stack, tag_type);
+      om->list_stack.types[om->list_stack.size++] = tag_type;
     }
     while (om->list_stack.size > indent + 1) {
-      int t = list_pop(&om->list_stack);
+      int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
-    if (om->list_stack.types[om->list_stack.size - 1] != tag_type) {
-      int t = list_pop(&om->list_stack);
+    if (om->list_stack.size > 0 &&
+        om->list_stack.types[om->list_stack.size - 1] != tag_type) {
+      int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
-      list_push(&om->list_stack, tag_type);
+      om->list_stack.types[om->list_stack.size++] = tag_type;
     }
-
     if (is_ul) {
       const char *rest = rel + 2;
-      size_t rest_len = rlen - 2;
-      if (rest_len >= 4 && rest[0] == '[' &&
-          (rest[1] == ' ' || rest[1] == 'x') && rest[2] == ']' &&
-          rest[3] == ' ') {
+      size_t r_l = rlen - 2;
+      if (r_l >= 4 && rest[0] == '[' && (rest[1] == ' ' || rest[1] == 'x') &&
+          rest[2] == ']' && rest[3] == ' ') {
         buf_append(out, "<li><input type=\"checkbox\" ");
         if (rest[1] == 'x')
           buf_append(out, "checked ");
+        else
+          buf_append(out, " ");
         buf_append(out, "disabled> ");
-        parse_inline(om, rest + 4, rest_len - 4, out);
+        parse_inline(om, rest + 4, r_l - 4, out);
         buf_append(out, "</li>\n");
       } else {
         buf_append(out, "<li>");
-        parse_inline(om, rest, rest_len, out);
+        parse_inline(om, rest, r_l, out);
         buf_append(out, "</li>\n");
       }
     } else {
@@ -421,15 +417,14 @@ void process_line(OctoMark *om, const char *line, size_t len, const char *full,
       parse_inline(om, rel + 3, rlen - 3, out);
       buf_append(out, "</li>\n");
     }
-    return;
+    return false;
   } else if (om->list_stack.size > 0) {
     while (om->list_stack.size > 0) {
-      int t = list_pop(&om->list_stack);
+      int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
   }
 
-  // Header, Quote, Table...
   if (rlen >= 2 && rel[0] == '#' && rel[1] == ' ') {
     buf_append(out, "<h1>");
     parse_inline(om, rel + 2, rlen - 2, out);
@@ -438,56 +433,143 @@ void process_line(OctoMark *om, const char *line, size_t len, const char *full,
     buf_append(out, "<blockquote>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</blockquote>\n");
-  } else if (t_end - t_start == 3 && strncmp(line + t_start, "---", 3) == 0) {
+  } else if (t_e - t_s == 3 && strncmp(line + t_s, "---", 3) == 0) {
     buf_append(out, "<hr>\n");
   } else if (rlen > 0 && rel[0] == '|') {
     if (!om->in_table) {
       const char *newline = strchr(full + next_pos, '\n');
       if (newline) {
-        size_t la_len = newline - (full + next_pos);
         const char *la = full + next_pos;
+        size_t la_l = newline - la;
         size_t ls = 0;
-        while (ls < la_len && isspace(la[ls]))
+        while (ls < la_l && isspace(la[ls]))
           ls++;
-        if (ls < la_len && la[ls] == '|') {
-          // Header confirmation logic truncated for simplicity, but same flow
+        if (ls < la_l && la[ls] == '|') {
           buf_append(out, "<table><thead><tr>");
-          // (Simplified table parsing here)
+          om->table_cols = 0;
+          const char *p = la;
+          if (*p == '|')
+            p++;
+          while (p < la + la_l && om->table_cols < 64) {
+            const char *next_p = (const char *)memchr(p, '|', (la + la_l) - p);
+            if (!next_p)
+              next_p = la + la_l;
+            const char *c = p;
+            while (c < next_p && isspace(*c))
+              c++;
+            bool l = (c < next_p && *c == ':');
+            const char *r_c = next_p - 1;
+            while (r_c > c && isspace(*r_c))
+              r_c--;
+            bool r = (r_c >= c && *r_c == ':');
+            om->table_aligns[om->table_cols++] =
+                (l && r) ? ALIGN_CENTER
+                         : (r ? ALIGN_RIGHT : (l ? ALIGN_LEFT : ALIGN_NONE));
+            p = next_p + 1;
+          }
+          p = rel;
+          if (*p == '|')
+            p++;
+          for (size_t i = 0; i < om->table_cols; i++) {
+            const char *next_p = (const char *)memchr(p, '|', (rel + rlen) - p);
+            size_t cell_len =
+                (next_p ? (size_t)(next_p - p) : (size_t)((rel + rlen) - p));
+            while (cell_len > 0 && isspace(*p)) {
+              p++;
+              cell_len--;
+            }
+            while (cell_len > 0 && isspace(p[cell_len - 1]))
+              cell_len--;
+            buf_append(out, "<th");
+            if (om->table_aligns[i] == ALIGN_LEFT)
+              buf_append(out, " style=\"text-align:left\"");
+            else if (om->table_aligns[i] == ALIGN_CENTER)
+              buf_append(out, " style=\"text-align:center\"");
+            else if (om->table_aligns[i] == ALIGN_RIGHT)
+              buf_append(out, " style=\"text-align:right\"");
+            buf_append(out, ">");
+            parse_inline(om, p, cell_len, out);
+            buf_append(out, "</th>");
+            if (!next_p)
+              break;
+            p = next_p + 1;
+          }
           buf_append(out, "</tr></thead><tbody>\n");
           om->in_table = true;
-          return; // Placeholder
+          return true;
         }
       }
     }
-    buf_append(out, "<tr><td>");
-    parse_inline(om, rel, rlen, out);
-    buf_append(out, "</td></tr>\n");
+    if (om->in_table) {
+      buf_append(out, "<tr>");
+      const char *p = rel;
+      if (*p == '|')
+        p++;
+      for (size_t i = 0; i < om->table_cols; i++) {
+        const char *next_p = (const char *)memchr(p, '|', (rel + rlen) - p);
+        size_t cell_len =
+            (next_p ? (size_t)(next_p - p) : (size_t)((rel + rlen) - p));
+        while (cell_len > 0 && isspace(*p)) {
+          p++;
+          cell_len--;
+        }
+        while (cell_len > 0 && isspace(p[cell_len - 1]))
+          cell_len--;
+        buf_append(out, "<td");
+        if (om->table_aligns[i] == ALIGN_LEFT)
+          buf_append(out, " style=\"text-align:left\"");
+        else if (om->table_aligns[i] == ALIGN_CENTER)
+          buf_append(out, " style=\"text-align:center\"");
+        else if (om->table_aligns[i] == ALIGN_RIGHT)
+          buf_append(out, " style=\"text-align:right\"");
+        buf_append(out, ">");
+        parse_inline(om, p, cell_len, out);
+        buf_append(out, "</td>");
+        if (!next_p)
+          break;
+        p = next_p + 1;
+      }
+      buf_append(out, "</tr>\n");
+    } else {
+      buf_append(out, "<p>");
+      parse_inline(om, line + t_s, t_e - t_s, out);
+      buf_append(out, "</p>\n");
+    }
+    return false;
   } else {
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
     }
     buf_append(out, "<p>");
-    parse_inline(om, line + t_start, t_end - t_start, out);
+    parse_inline(om, line + t_s, t_e - t_s, out);
     buf_append(out, "</p>\n");
   }
+  return false;
 }
 
-void octomark_feed(OctoMark *om, const char *chunk, size_t len, Buffer *out) {
+void octomark_feed(OctoMark *restrict om, const char *restrict chunk,
+                   size_t len, Buffer *restrict out) {
   buf_append_n(&om->leftover, chunk, len);
   char *data = om->leftover.data;
   size_t size = om->leftover.size;
   size_t pos = 0;
-
   while (pos < size) {
     char *next = (char *)memchr(data + pos, '\n', size - pos);
     if (!next)
       break;
     size_t line_len = next - (data + pos);
-    process_line(om, data + pos, line_len, data, pos + line_len + 1, out);
+    bool skip_next =
+        process_line(om, data + pos, line_len, data, pos + line_len + 1, out);
     pos += line_len + 1;
+    if (skip_next) {
+      char *next_next = (char *)memchr(data + pos, '\n', size - pos);
+      if (next_next)
+        pos = (size_t)(next_next - data + 1);
+      else
+        pos = size;
+    }
   }
-
   if (pos > 0) {
     size_t rem = size - pos;
     memmove(data, data + pos, rem);
@@ -503,7 +585,7 @@ void octomark_finish(OctoMark *om, Buffer *out) {
     om->leftover.size = 0;
   }
   while (om->list_stack.size > 0) {
-    int t = list_pop(&om->list_stack);
+    int t = om->list_stack.types[--om->list_stack.size];
     buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
   }
   if (om->in_table) {
@@ -520,28 +602,41 @@ void octomark_finish(OctoMark *om, Buffer *out) {
   }
 }
 
+#ifndef OCTOMARK_NO_MAIN
 int main() {
   OctoMark om;
   octomark_init(&om);
   Buffer output;
-  buf_init(&output, 10 * 1024 * 1024);
+  buf_init(&output, 100 * 1024 * 1024);
 
-  const char *data = "# Title\n- [x] Task\nThis is **bold** and `code`.\n";
-  size_t data_len = strlen(data);
+  const char *line1 = "# Title for C99 test\n";
+  const char *line2 = "- Item with **bold**, `code`, and $math$\n";
+  const char *line3 = "Regular text for streaming performance measurement.\n";
 
-  printf("--- Streaming C99 Benchmark ---\n");
+  printf("--- OctoMark Turbo C99 Benchmark ---\n");
   clock_t t1 = clock();
-  for (int i = 0; i < 100000; i++) {
-    octomark_feed(&om, data, data_len, &output);
+  for (int i = 0; i < 1000000; i++) {
+    octomark_feed(&om, line1, strlen(line1), &output);
+    octomark_feed(&om, line2, strlen(line2), &output);
+    octomark_feed(&om, line3, strlen(line3), &output);
   }
   octomark_finish(&om, &output);
   clock_t t2 = clock();
 
   double sec = (double)(t2 - t1) / CLOCKS_PER_SEC;
-  double mb = (double)data_len * 100000 / (1024 * 1024);
-  printf("Speed: %.2f MB/s (Total %.2f MB in %.3f sec)\n", mb / sec, mb, sec);
+  size_t total_in = (strlen(line1) + strlen(line2) + strlen(line3)) * 1000000;
+  double gb_s = (double)total_in / (sec * 1024 * 1024 * 1024);
+
+  printf("------------------------------------------\n");
+  printf("Data Size:  %.2f MB\n", (double)total_in / (1024 * 1024));
+  printf("Time Taken: %.3f sec\n", sec);
+  printf("Throughput: %.3f GB/s\n", gb_s);
+  printf("------------------------------------------\n");
 
   buf_free(&output);
-  octomark_init(&om);
+  octomark_free(&om);
   return 0;
 }
+#endif
+
+#endif
