@@ -39,14 +39,13 @@ pub fn main() !void {
 
         var out_buf: [4096]u8 = undefined;
         var stdout_writer = null_file.writer(&out_buf);
-        const writer = &stdout_writer.interface;
 
         var timer = try std.time.Timer.start();
 
         var reader = std.io.Reader.fixed(data);
 
-        try parser.parse(&reader, writer, allocator);
-        try writer.flush();
+        try parser.parse(&reader, &stdout_writer.interface, allocator);
+        try stdout_writer.interface.flush();
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
