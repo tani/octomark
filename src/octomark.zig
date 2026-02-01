@@ -88,6 +88,7 @@ pub const OctomarkParser = struct {
         try self.finish(writer);
     }
 
+    /// Feed a chunk into the parser. Returns error.OutOfMemory or writer errors.
     pub fn feed(self: *OctomarkParser, chunk: []const u8, output: anytype, allocator: std.mem.Allocator) !void {
         try self.pending_buffer.appendSlice(allocator, chunk);
         const data = self.pending_buffer.items;
