@@ -11,8 +11,9 @@ typedef struct {
 
 TestCase tests[] = {
     {"Heading", "# Hello World", "<h1>Hello World</h1>\n"},
-    {"Blockquote", "> This is a quote",
-     "<blockquote>This is a quote\n</blockquote>\n"},
+    {"Blockquote", "> # Heading\n> - Case 1\n> - Case 2",
+     "<blockquote><h1>Heading</h1>\n<ul>\n<li>Case 1</li>\n<li>Case "
+     "2</li>\n</ul>\n</blockquote>\n"},
     {"Horizontal Rule", "---", "<hr>\n"},
     {"Inline Styles", "**Bold** and _Italic_ and `Code`",
      "<p><strong>Bold</strong> and <em>Italic</em> and "

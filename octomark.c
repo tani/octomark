@@ -108,6 +108,22 @@ void octomark_init(OctoMark *om) {
 void octomark_free(OctoMark *om) { buf_free(&om->leftover); }
 
 static void close_blocks(OctoMark *om, Buffer *out, int mask) {
+  if ((mask & B_CODE) && om->in_code) {
+    buf_append(out, "</code></pre>\n");
+    om->in_code = false;
+  }
+  if ((mask & B_MATH) && om->in_math) {
+    buf_append(out, "</div>\n");
+    om->in_math = false;
+  }
+  if ((mask & B_TABLE) && om->in_table) {
+    buf_append(out, "</tbody></table>\n");
+    om->in_table = false;
+  }
+  if ((mask & B_DL) && om->in_dl) {
+    buf_append(out, "</dl>\n");
+    om->in_dl = false;
+  }
   if ((mask & B_LIST) && om->list_stack.size > 0) {
     while (om->list_stack.size > 0) {
       if (om->list_item_open[om->list_stack.size - 1]) {
@@ -118,25 +134,9 @@ static void close_blocks(OctoMark *om, Buffer *out, int mask) {
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
   }
-  if ((mask & B_DL) && om->in_dl) {
-    buf_append(out, "</dl>\n");
-    om->in_dl = false;
-  }
-  if ((mask & B_TABLE) && om->in_table) {
-    buf_append(out, "</tbody></table>\n");
-    om->in_table = false;
-  }
   if ((mask & B_QUOTE) && om->in_quote) {
     buf_append(out, "</blockquote>\n");
     om->in_quote = false;
-  }
-  if ((mask & B_MATH) && om->in_math) {
-    buf_append(out, "</div>\n");
-    om->in_math = false;
-  }
-  if ((mask & B_CODE) && om->in_code) {
-    buf_append(out, "</code></pre>\n");
-    om->in_code = false;
   }
 }
 
@@ -376,67 +376,94 @@ static size_t split_row(const char *line, size_t len, const char **cells,
 bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
                   const char *restrict full, size_t next_pos,
                   Buffer *restrict out) {
-  size_t t_s = 0;
-  while (t_s < len && isspace(line[t_s]))
-    t_s++;
-  size_t t_e = len;
-  while (t_e > t_s && isspace(line[t_e - 1]))
-    t_e--;
-  bool empty = (t_s == t_e);
-
-  if (!om->in_code && empty) {
-    close_blocks(om, out, B_INTERRUPT);
+  if (om->in_code) {
+    size_t t_s = 0;
+    while (t_s < len && isspace(line[t_s]))
+      t_s++;
+    if (len - t_s >= 3 && strncmp(line + t_s, "```", 3) == 0) {
+      close_blocks(om, out, B_CODE);
+      return false;
+    }
+    escape_buf(om, line, len, out);
+    buf_push(out, '\n');
+    return false;
+  }
+  if (om->in_math) {
+    size_t t_s = 0;
+    while (t_s < len && isspace(line[t_s]))
+      t_s++;
+    if (len - t_s >= 2 && strncmp(line + t_s, "$$", 2) == 0) {
+      close_blocks(om, out, B_MATH);
+      return false;
+    }
+    escape_buf(om, line, len, out);
+    buf_push(out, '\n');
     return false;
   }
 
-  size_t indent = 0;
-  if (!om->in_code) {
-    while (len >= indent * 2 + 2 && line[indent * 2] == ' ' &&
-           line[indent * 2 + 1] == ' ')
-      indent++;
+  size_t leading_spaces = 0;
+  while (leading_spaces < len && line[leading_spaces] == ' ')
+    leading_spaces++;
+  const char *rel = line + leading_spaces;
+  size_t rlen = len - leading_spaces;
+
+  bool has_quote = (rlen > 0 && rel[0] == '>');
+  size_t indent = leading_spaces / 2;
+
+  if (has_quote) {
+    if (!om->in_quote) {
+      close_blocks(om, out, B_INTERRUPT);
+      buf_append(out, "<blockquote>");
+      om->in_quote = true;
+    }
+    rel++;
+    rlen--;
+    if (rlen > 0 && rel[0] == ' ') {
+      rel++;
+      rlen--;
+    }
+    size_t inner_spaces = 0;
+    while (inner_spaces < rlen && rel[inner_spaces] == ' ')
+      inner_spaces++;
+    indent = inner_spaces / 2;
+    rel += inner_spaces;
+    rlen -= inner_spaces;
+  } else if (om->in_quote) {
+    close_blocks(om, out, (B_ALL & ~B_CODE) & ~B_MATH);
   }
-  const char *rel = line + indent * 2;
-  size_t rlen = len - indent * 2;
+
+  if (rlen == 0) {
+    close_blocks(om, out, B_LIST | B_TABLE | B_DL);
+    return false;
+  }
 
   if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
-    close_blocks(om, out, B_INTERRUPT);
-    if (!om->in_code) {
-      buf_append(out, "<pre><code");
-      size_t lang_len = 0;
-      while (3 + lang_len < rlen && !isspace(rel[3 + lang_len]))
-        lang_len++;
-      if (lang_len > 0) {
-        buf_append(out, " class=\"language-");
-        escape_buf(om, rel + 3, lang_len, out);
-        buf_append(out, "\"");
-      }
-      buf_append(out, ">");
-    } else
-      buf_append(out, "</code></pre>\n");
-    om->in_code = !om->in_code;
+    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    buf_append(out, "<pre><code");
+    size_t lang_len = 0;
+    while (3 + lang_len < rlen && !isspace(rel[3 + lang_len]))
+      lang_len++;
+    if (lang_len > 0) {
+      buf_append(out, " class=\"language-");
+      escape_buf(om, rel + 3, lang_len, out);
+      buf_append(out, "\"");
+    }
+    buf_append(out, ">");
+    om->in_code = true;
     return false;
   }
 
   if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
-    close_blocks(om, out, B_INTERRUPT);
-    if (!om->in_math)
-      buf_append(out, "<div class=\"math\">");
-    else
-      buf_append(out, "</div>\n");
-    om->in_math = !om->in_math;
-    return false;
-  }
-
-  if (om->in_math || om->in_code) {
-    escape_buf(om, line, len, out);
-    buf_push(out, '\n');
+    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    buf_append(out, "<div class=\"math\">");
+    om->in_math = true;
     return false;
   }
 
   bool is_ul = (rlen >= 2 && rel[0] == '-' && rel[1] == ' ');
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
-    close_blocks(om, out, B_INTERRUPT & ~B_LIST);
+    close_blocks(om, out, (B_TABLE | B_DL) & ~B_QUOTE);
     int tag_type = is_ul ? 0 : 1;
     while (om->list_stack.size > indent + 1) {
       if (om->list_item_open[om->list_stack.size - 1])
@@ -486,47 +513,45 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '#' && rel[1] == ' ') {
-    close_blocks(om, out, B_INTERRUPT);
+    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
     buf_append(out, "<h1>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</h1>\n");
-  } else if (rlen >= 2 && rel[0] == '>' && rel[1] == ' ') {
-    if (!om->in_quote) {
-      close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
-      buf_append(out, "<blockquote>");
-      om->in_quote = true;
-    }
-    parse_inline(om, rel + 2, rlen - 2, out);
-    buf_append(out, "\n");
     return false;
-  } else if (t_e - t_s == 3 && strncmp(line + t_s, "---", 3) == 0) {
-    close_blocks(om, out, B_INTERRUPT);
+  }
+
+  if (rlen == 3 && strncmp(rel, "---", 3) == 0) {
+    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
     buf_append(out, "<hr>\n");
-  } else if (rlen > 0 && rel[0] == '|') {
-    if (om->in_dl || om->in_quote)
-      close_blocks(om, out, B_DL | B_QUOTE);
+    return false;
+  }
+
+  if (rlen > 0 && rel[0] == '|') {
     if (!om->in_table) {
-      const char *newline = strchr(full + next_pos, '\n');
-      if (newline) {
-        const char *la = full + next_pos;
-        size_t la_l = newline - la;
+      const char *next_line = full + next_pos;
+      const char *next_newline = strchr(next_line, '\n');
+      if (next_newline) {
+        const char *la = next_line;
+        size_t la_l = next_newline - la;
         size_t ls = 0;
         while (ls < la_l && isspace(la[ls]))
           ls++;
         if (ls < la_l && la[ls] == '|') {
-          close_blocks(om, out, B_INTERRUPT & ~B_TABLE);
+          close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_TABLE);
           buf_append(out, "<table><thead><tr>");
           om->table_cols = 0;
           const char *p = la;
-          if (*p == '|')
+          if (*p != '|')
+            p = strchr(p, '|');
+          if (p && *p == '|')
             p++;
-          while (p < newline) {
-            while (p < newline && isspace(*p))
+          while (p && p < next_newline) {
+            while (p < next_newline && isspace(*p))
               p++;
-            if (p >= newline)
+            if (p >= next_newline)
               break;
             const char *start = p;
-            while (p < newline && *p != '|')
+            while (p < next_newline && *p != '|')
               p++;
             const char *end = p;
             while (end > start && isspace(end[-1]))
@@ -541,15 +566,15 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
             else if (left)
               align = ALIGN_LEFT;
             om->table_aligns[om->table_cols++] = align;
-            if (p < newline && *p == '|')
+            if (p < next_newline && *p == '|')
               p++;
           }
           const char *h_cells[64];
           size_t h_lens[64];
-          size_t h_count = split_row(line, len, h_cells, h_lens);
-          for (size_t i = 0; i < h_count; i++) {
+          size_t h_count = split_row(rel, rlen, h_cells, h_lens);
+          for (size_t k = 0; k < h_count; k++) {
             buf_append(out, "<th");
-            Align a = (i < om->table_cols) ? om->table_aligns[i] : ALIGN_NONE;
+            Align a = (k < om->table_cols) ? om->table_aligns[k] : ALIGN_NONE;
             if (a == ALIGN_LEFT)
               buf_append(out, " style=\"text-align:left\"");
             else if (a == ALIGN_CENTER)
@@ -557,7 +582,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
             else if (a == ALIGN_RIGHT)
               buf_append(out, " style=\"text-align:right\"");
             buf_append(out, ">");
-            parse_inline(om, h_cells[i], h_lens[i], out);
+            parse_inline(om, h_cells[k], h_lens[k], out);
             buf_append(out, "</th>");
           }
           buf_append(out, "</tr></thead><tbody>\n");
@@ -569,11 +594,11 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     if (om->in_table) {
       const char *b_cells[64];
       size_t b_lens[64];
-      size_t b_count = split_row(line, len, b_cells, b_lens);
+      size_t b_count = split_row(rel, rlen, b_cells, b_lens);
       buf_append(out, "<tr>");
-      for (size_t i = 0; i < b_count; i++) {
+      for (size_t k = 0; k < b_count; k++) {
         buf_append(out, "<td");
-        Align a = (i < om->table_cols) ? om->table_aligns[i] : ALIGN_NONE;
+        Align a = (k < om->table_cols) ? om->table_aligns[k] : ALIGN_NONE;
         if (a == ALIGN_LEFT)
           buf_append(out, " style=\"text-align:left\"");
         else if (a == ALIGN_CENTER)
@@ -581,19 +606,17 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
         else if (a == ALIGN_RIGHT)
           buf_append(out, " style=\"text-align:right\"");
         buf_append(out, ">");
-        parse_inline(om, b_cells[i], b_lens[i], out);
+        parse_inline(om, b_cells[k], b_lens[k], out);
         buf_append(out, "</td>");
       }
       buf_append(out, "</tr>\n");
       return false;
     }
-    buf_append(out, "<p>");
-    parse_inline(om, line + t_s, t_e - t_s, out);
-    buf_append(out, "</p>\n");
-  } else if (rlen > 0 && rel[0] == ':') {
-    if (om->in_quote)
-      close_blocks(om, out, B_QUOTE);
+  }
+
+  if (rlen > 0 && rel[0] == ':') {
     if (!om->in_dl) {
+      close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL);
       buf_append(out, "<dl>\n");
       om->in_dl = true;
     }
@@ -619,20 +642,19 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
         next_is_def = true;
     }
     if (next_is_def) {
-      if (om->in_quote)
-        close_blocks(om, out, B_QUOTE);
       if (!om->in_dl) {
+        close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL);
         buf_append(out, "<dl>\n");
         om->in_dl = true;
       }
       buf_append(out, "<dt>");
-      parse_inline(om, line + t_s, t_e - t_s, out);
+      parse_inline(om, rel, rlen, out);
       buf_append(out, "</dt>\n");
       return false;
     }
-    close_blocks(om, out, B_INTERRUPT);
+    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
     buf_append(out, "<p>");
-    parse_inline(om, line + t_s, t_e - t_s, out);
+    parse_inline(om, rel, rlen, out);
     buf_append(out, "</p>\n");
   }
   return false;
@@ -683,7 +705,6 @@ int main() {
   octomark_init(&om);
   Buffer output;
   buf_init(&output, 65536);
-
   char buf[65536];
   size_t bytes;
   while ((bytes = fread(buf, 1, sizeof(buf), stdin)) > 0) {
@@ -694,12 +715,9 @@ int main() {
       output.data[0] = '\0';
     }
   }
-
   octomark_finish(&om, &output);
-  if (output.size > 0) {
+  if (output.size > 0)
     fwrite(output.data, 1, output.size, stdout);
-  }
-
   buf_free(&output);
   octomark_free(&om);
   return 0;
