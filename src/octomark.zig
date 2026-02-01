@@ -30,13 +30,25 @@ const Buffer = std.ArrayListUnmanaged(u8);
 const AllocError = std.mem.Allocator.Error;
 const ParseError = AllocError || std.fs.File.WriteError;
 
-const FastWriter = struct {
+/// Parser configuration options.
+pub const OctomarkOptions = struct {
+    enable_html: bool = false,
+};
+
+/// Buffered writer optimized for repeated small writes.
+pub const FastWriter = struct {
     file: std.fs.File,
     buffer: []u8,
     index: usize,
 
-    fn init(file: std.fs.File, buffer: []u8) FastWriter {
+    /// Create a FastWriter using the given file and buffer storage.
+    pub fn init(file: std.fs.File, buffer: []u8) FastWriter {
         return .{ .file = file, .buffer = buffer, .index = 0 };
+    }
+
+    /// Convenience helper for stdout.
+    pub fn fromStdout(buffer: []u8) FastWriter {
+        return .{ .file = std.fs.File.stdout(), .buffer = buffer, .index = 0 };
     }
 
     fn writeAll(self: *FastWriter, data: []const u8) std.fs.File.WriteError!void {
@@ -58,7 +70,7 @@ const FastWriter = struct {
         self.index += 1;
     }
 
-    fn flush(self: *FastWriter) std.fs.File.WriteError!void {
+    pub fn flush(self: *FastWriter) std.fs.File.WriteError!void {
         if (self.index == 0) return;
         try self.file.writeAll(self.buffer[0..self.index]);
         self.index = 0;
@@ -66,7 +78,7 @@ const FastWriter = struct {
 };
 
 
-const OctomarkParser = struct {
+pub const OctomarkParser = struct {
     is_special_char: [256]bool = [_]bool{false} ** 256,
     html_escape_map: [256]?[]const u8 = [_]?[]const u8{null} ** 256,
     table_alignments: [64]TableAlignment = [_]TableAlignment{TableAlignment.none} ** 64,
@@ -74,7 +86,74 @@ const OctomarkParser = struct {
     block_stack: [MAX_BLOCK_NESTING]BlockEntry = undefined,
     stack_depth: usize = 0,
     pending_buffer: Buffer = undefined,
-    enable_html: bool = false,
+    options: OctomarkOptions = .{},
+
+    /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
+    pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) AllocError!void {
+        self.* = OctomarkParser{};
+        const special = "\\['*`&<>\"'_~!$h";
+        for (special) |ch| self.is_special_char[ch] = true;
+        self.html_escape_map['&'] = "&amp;";
+        self.html_escape_map['<'] = "&lt;";
+        self.html_escape_map['>'] = "&gt;";
+        self.html_escape_map['\"'] = "&quot;";
+        self.html_escape_map['\''] = "&#39;";
+        self.pending_buffer = .{};
+        try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
+        self.options = .{};
+    }
+
+    /// Release parser-owned buffers. Safe to call after any error.
+    pub fn deinit(self: *OctomarkParser, allocator: std.mem.Allocator) void {
+        self.pending_buffer.deinit(allocator);
+    }
+
+    /// Enable parsing options.
+    pub fn setOptions(self: *OctomarkParser, options: OctomarkOptions) void {
+        self.options = options;
+    }
+
+    /// Feed a chunk into the parser. Returns error.OutOfMemory or writer errors.
+    pub fn feed(self: *OctomarkParser, chunk: []const u8, output: *FastWriter, allocator: std.mem.Allocator) ParseError!void {
+        try self.pending_buffer.appendSlice(allocator, chunk);
+        const data = self.pending_buffer.items;
+        const size = self.pending_buffer.items.len;
+        var pos: usize = 0;
+        while (pos < size) {
+            const next = std.mem.indexOfScalar(u8, data[pos..], '\n');
+            if (next == null) break;
+            const line_len = next.?;
+            const skip = try processSingleLine(self, data[pos .. pos + line_len], data, pos + line_len + 1, output);
+            pos += line_len + 1;
+            if (skip) {
+                const nn = std.mem.indexOfScalar(u8, data[pos..], '\n');
+                if (nn) |offset| {
+                    pos += offset + 1;
+                } else {
+                    pos = size;
+                }
+            }
+        }
+        if (pos > 0) {
+            const rem = size - pos;
+            if (rem > 0) std.mem.copyForwards(u8, self.pending_buffer.items[0..rem], self.pending_buffer.items[pos .. pos + rem]);
+            self.pending_buffer.items.len = rem;
+        }
+    }
+
+    /// Finalize parsing and close any open blocks. Returns writer errors.
+    pub fn finish(self: *OctomarkParser, output: *FastWriter) ParseError!void {
+        if (self.pending_buffer.items.len > 0) {
+            _ = try processSingleLine(
+                self,
+                self.pending_buffer.items[0..self.pending_buffer.items.len],
+                self.pending_buffer.items,
+                self.pending_buffer.items.len,
+                output,
+            );
+        }
+        while (self.stack_depth > 0) try renderAndCloseTopBlock(self, output);
+    }
 };
 
 fn tryParseHtmlTag(text: []const u8) usize {
@@ -135,27 +214,9 @@ fn tryParseHtmlTag(text: []const u8) usize {
     return 0;
 }
 
-/// Initializes parser state. Returns error.OutOfMemory on allocation failure.
-pub fn octomarkInit(parser: *OctomarkParser, allocator: std.mem.Allocator) AllocError!void {
-    parser.* = OctomarkParser{};
-    const special = "\\['*`&<>\"'_~!$h";
-    for (special) |ch| parser.is_special_char[ch] = true;
-    parser.html_escape_map['&'] = "&amp;";
-    parser.html_escape_map['<'] = "&lt;";
-    parser.html_escape_map['>'] = "&gt;";
-    parser.html_escape_map['\"'] = "&quot;";
-    parser.html_escape_map['\''] = "&#39;";
-    parser.pending_buffer = .{};
-    try parser.pending_buffer.ensureTotalCapacity(allocator, 4096);
-    parser.enable_html = false;
-}
-
-/// Releases parser-owned buffers. Safe to call after any error.
-pub fn octomarkFree(parser: *OctomarkParser, allocator: std.mem.Allocator) void {
-    parser.pending_buffer.deinit(allocator);
-}
 
 fn pushBlock(parser: *OctomarkParser, block_type: BlockType, indent: i32) void {
+    std.debug.assert(parser.stack_depth <= MAX_BLOCK_NESTING);
     if (parser.stack_depth < MAX_BLOCK_NESTING) {
         parser.block_stack[parser.stack_depth] = BlockEntry{ .block_type = block_type, .indent_level = indent };
         parser.stack_depth += 1;
@@ -168,12 +229,8 @@ fn peekBlock(parser: *OctomarkParser) ?*BlockEntry {
 }
 
 fn popBlock(parser: *OctomarkParser) void {
+    std.debug.assert(parser.stack_depth <= MAX_BLOCK_NESTING);
     if (parser.stack_depth > 0) parser.stack_depth -= 1;
-}
-
-fn currentBlockTypeValue(parser: *const OctomarkParser) i32 {
-    if (parser.stack_depth == 0) return -1;
-    return @intFromEnum(parser.block_stack[parser.stack_depth - 1].block_type);
 }
 
 fn currentBlockType(parser: *const OctomarkParser) ?BlockType {
@@ -203,11 +260,8 @@ fn closeParagraphIfOpen(parser: *OctomarkParser, output: *FastWriter) ParseError
 }
 
 fn closeLeafBlocks(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
-    const block_value = currentBlockTypeValue(parser);
-    if (block_value == @intFromEnum(BlockType.paragraph) or
-        block_value == @intFromEnum(BlockType.table) or
-        block_value == @intFromEnum(BlockType.code) or
-        block_value == @intFromEnum(BlockType.math))
+    const block_type = currentBlockType(parser);
+    if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math)
     {
         try renderAndCloseTopBlock(parser, output);
     }
@@ -250,7 +304,7 @@ fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *
         if (i > start) try output.writeAll(text[start..i]);
         if (i >= length) break;
 
-        if (text[i] == '<' and parser.enable_html) {
+    if (text[i] == '<' and parser.options.enable_html) {
             const tag_len = tryParseHtmlTag(text[i..]);
             if (tag_len > 0) {
                 try output.writeAll(text[i .. i + tag_len]);
@@ -560,7 +614,7 @@ fn tryParseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_
         const target_type: BlockType = if (is_ul) .unordered_list else .ordered_list;
         const current_indent: i32 = @intCast(leading_spaces + internal_spaces);
         while (parser.stack_depth > 0 and
-            currentBlockTypeValue(parser) < @intFromEnum(BlockType.blockquote) and
+            currentBlockType(parser) != null and @intFromEnum(currentBlockType(parser).?) < @intFromEnum(BlockType.blockquote) and
             (peekBlock(parser).?.indent_level > current_indent or
                 (peekBlock(parser).?.indent_level == current_indent and currentBlockType(parser) != target_type)))
         {
@@ -703,9 +757,10 @@ fn tryParseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, ful
 }
 
 fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bool, is_list: bool, output: *FastWriter) ParseError!void {
-    const block_value = currentBlockTypeValue(parser);
+    const block_type = currentBlockType(parser);
     const in_container = (parser.stack_depth > 0 and
-        (block_value < @intFromEnum(BlockType.blockquote) or block_value == @intFromEnum(BlockType.definition_description)));
+        (block_type != null and
+            (@intFromEnum(block_type.?) < @intFromEnum(BlockType.blockquote) or block_type.? == .definition_description)));
 
     if (currentBlockType(parser) != .paragraph and !in_container) {
         try output.writeAll("<p>");
@@ -728,9 +783,9 @@ fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []con
 
     if (line_content.len == 0) {
         try closeLeafBlocks(parser, output);
-        while (parser.stack_depth > 0 and currentBlockTypeValue(parser) >= @intFromEnum(BlockType.blockquote)) {
-            try renderAndCloseTopBlock(parser, output);
-        }
+    while (parser.stack_depth > 0 and currentBlockType(parser) != null and @intFromEnum(currentBlockType(parser).?) >= @intFromEnum(BlockType.blockquote)) {
+        try renderAndCloseTopBlock(parser, output);
+    }
         return false;
     }
 
@@ -777,73 +832,25 @@ fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []con
     return false;
 }
 
-/// Feeds a chunk into the parser. Returns error.OutOfMemory or writer errors.
-pub fn octomarkFeed(
-    parser: *OctomarkParser,
-    chunk: []const u8,
-    output: *FastWriter,
-    allocator: std.mem.Allocator,
-) ParseError!void {
-    try parser.pending_buffer.appendSlice(allocator, chunk);
-    const data = parser.pending_buffer.items;
-    const size = parser.pending_buffer.items.len;
-    var pos: usize = 0;
-    while (pos < size) {
-        const next = std.mem.indexOfScalar(u8, data[pos..], '\n');
-        if (next == null) break;
-        const line_len = next.?;
-        const skip = try processSingleLine(parser, data[pos .. pos + line_len], data, pos + line_len + 1, output);
-        pos += line_len + 1;
-        if (skip) {
-            const nn = std.mem.indexOfScalar(u8, data[pos..], '\n');
-            if (nn) |offset| {
-                pos += offset + 1;
-            } else {
-                pos = size;
-            }
-        }
-    }
-    if (pos > 0) {
-        const rem = size - pos;
-        if (rem > 0) std.mem.copyForwards(u8, parser.pending_buffer.items[0..rem], parser.pending_buffer.items[pos .. pos + rem]);
-        parser.pending_buffer.items.len = rem;
-    }
-}
-
-/// Finalizes parsing and closes any open blocks. Returns writer errors.
-pub fn octomarkFinish(parser: *OctomarkParser, output: *FastWriter) ParseError!void {
-    if (parser.pending_buffer.items.len > 0) {
-        _ = try processSingleLine(
-            parser,
-            parser.pending_buffer.items[0..parser.pending_buffer.items.len],
-            parser.pending_buffer.items,
-            parser.pending_buffer.items.len,
-            output,
-        );
-    }
-    while (parser.stack_depth > 0) try renderAndCloseTopBlock(parser, output);
-}
-
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     var parser: OctomarkParser = undefined;
-    try octomarkInit(&parser, allocator);
-    defer octomarkFree(&parser, allocator);
+    try parser.init(allocator);
+    defer parser.deinit(allocator);
 
     const stdin_file = std.fs.File.stdin();
-    const stdout_file = std.fs.File.stdout();
     var reader_buffer: [65536]u8 = undefined;
     var reader = stdin_file.reader(&reader_buffer);
     var writer_buffer: [65536]u8 = undefined;
-    var writer = FastWriter.init(stdout_file, &writer_buffer);
+    var writer = FastWriter.fromStdout(&writer_buffer);
     var chunk: [65536]u8 = undefined;
 
     while (true) {
         const n = try reader.interface.readSliceShort(&chunk);
         if (n == 0) break;
-        try octomarkFeed(&parser, chunk[0..n], &writer, allocator);
+        try parser.feed(chunk[0..n], &writer, allocator);
     }
 
-    try octomarkFinish(&parser, &writer);
+    try parser.finish(&writer);
     try writer.flush();
 }
