@@ -12,7 +12,7 @@ typedef struct {
 TestCase tests[] = {
     {"Heading", "# Hello World", "<h1>Hello World</h1>\n"},
     {"Blockquote", "> This is a quote",
-     "<blockquote>This is a quote</blockquote>\n"},
+     "<blockquote>This is a quote\n</blockquote>\n"},
     {"Horizontal Rule", "---", "<hr>\n"},
     {"Inline Styles", "**Bold** and _Italic_ and `Code`",
      "<p><strong>Bold</strong> and <em>Italic</em> and "
