@@ -64,6 +64,31 @@ const tests = [
         name: "Aligned Table",
         input: "| Left | Center | Right |\n|:---|:---:|---:|\n| A | B | C |",
         expected: '<table><thead><tr><th style="text-align:left">Left</th><th style="text-align:center">Center</th><th style="text-align:right">Right</th></tr></thead><tbody>\n<tr><td style="text-align:left">A</td><td style="text-align:center">B</td><td style="text-align:right">C</td></tr>\n</tbody></table>\n'
+    },
+    {
+        name: "Nested Inline Styles",
+        input: "**_Bold Italic_**",
+        expected: "<p><strong><em>Bold Italic</em></strong></p>\n"
+    },
+    {
+        name: "Table with Inline Styles",
+        input: "| **Bold** | `Code` |\n|---|---|\n| _Italic_ | [Link](url) |",
+        expected: "<table><thead><tr><th><strong>Bold</strong></th><th><code>Code</code></th></tr></thead><tbody>\n<tr><td><em>Italic</em></td><td><a href=\"url\">Link</a></td></tr>\n</tbody></table>\n"
+    },
+    {
+        name: "Code Block Escaping",
+        input: "```html\n<div></div>\n```",
+        expected: '<pre><code class="language-html">&lt;div&gt;&lt;/div&gt;\n</code></pre>\n'
+    },
+    {
+        name: "Mixed List Types",
+        input: "- Regular\n- [ ] Task",
+        expected: "<ul>\n<li>Regular</li>\n<li><input type=\"checkbox\"  disabled> Task</li>\n</ul>\n"
+    },
+    {
+        name: "Linear Paragraphs",
+        input: "Line 1\nLine 2",
+        expected: "<p>Line 1</p>\n<p>Line 2</p>\n"
     }
 ];
 
