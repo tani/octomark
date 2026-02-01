@@ -151,3 +151,45 @@ console.log(`[markdown-it] Time taken: ${durationMd.toFixed(2)}ms`);
 console.log(`[markdown-it] Speed: ${(lines.length / (durationMd / 1000)).toFixed(0)} lines/sec`);
 
 console.log(`\nComparison: OctoMark is ${(durationMd / duration).toFixed(2)}x faster than markdown-it`);
+
+// --- Deeply Nested List Benchmark ---
+console.log("\n--- Starting Deeply Nested List Benchmark ---");
+const nestedLines = [];
+for (let i = 0; i < 500; i++) {
+    nestedLines.push(" ".repeat(i * 4) + "- Nest Level " + i);
+}
+// Unwind
+for (let i = 499; i >= 0; i--) {
+    nestedLines.push(" ".repeat(i * 4) + "- Nest Level " + i);
+}
+const nestedInput = nestedLines.join("\n");
+
+console.log(`Parsing ${nestedLines.length} lines of Deeply Nested List...`);
+
+const startNested = performance.now();
+parser.parse(nestedInput);
+const endNested = performance.now();
+console.log(`[OctoMark] Nested Time: ${(endNested - startNested).toFixed(2)}ms`);
+
+const startNestedMd = performance.now();
+mdIt.render(nestedInput);
+const endNestedMd = performance.now();
+console.log(`[markdown-it] Nested Time: ${(endNestedMd - startNestedMd).toFixed(2)}ms`);
+
+
+// --- Long Inline Benchmark ---
+console.log("\n--- Starting Long Inline Benchmark ---");
+const longLine = "Word ".repeat(10000) + "**Bold** " + "_Italic_ " + "`Code` ".repeat(100);
+const longInput = longLine.repeat(100); // 100 huge paragraphs
+
+console.log(`Parsing ${longInput.length} chars of Heavy Inline content...`);
+
+const startInline = performance.now();
+parser.parse(longInput);
+const endInline = performance.now();
+console.log(`[OctoMark] Inline Time: ${(endInline - startInline).toFixed(2)}ms`);
+
+const startInlineMd = performance.now();
+mdIt.render(longInput);
+const endInlineMd = performance.now();
+console.log(`[markdown-it] Inline Time: ${(endInlineMd - startInlineMd).toFixed(2)}ms`);
