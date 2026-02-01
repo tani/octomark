@@ -8,7 +8,7 @@ OctoMark is an ultra-high performance, streaming Markdown parser written in pure
 
 ## Key Features
 
-- **Extreme Performance**: Achieves typical throughput of **0.6+ GB/s** (over 650 MB/s) on modern hardware.
+- **Extreme Performance**: Sustained throughput depends on input; see the benchmark section for local measurement.
 - **Pure C99**: No external dependencies beyond the C standard library. Highly portable.
 - **Streaming First**: Built-in support for chunked data processing using a persistent state and leftover buffer management.
 - **Buffer Passing Architecture**: Minimizes memory allocations by using a flexible buffer management system.
@@ -19,10 +19,20 @@ OctoMark is an ultra-high performance, streaming Markdown parser written in pure
 
 ## Performance Benchmark
 
-On an M-series Mac / modern x86_64, OctoMark C99 implementation shows:
+The benchmark runner repeats `EXAMPLE.md` to reach target sizes and measures
+streaming throughput.
 
-- **Speed**: ~0.65 GB/s
-- **Correctness**: Passes 100% of the cross-platform test suite (25+ cases including Tables, Math, and Lists).
+```bash
+make benchmark
+./benchmark
+```
+
+Recent run (EXAMPLE.md on this machine):
+
+- 10 MB: 24.63 ms (0.40 GB/s)
+- 50 MB: 96.16 ms (0.51 GB/s)
+- 100 MB: 190.23 ms (0.51 GB/s)
+- 200 MB: 386.32 ms (0.51 GB/s)
 
 ## Syntax Support
 
@@ -42,14 +52,24 @@ Use any C99-compliant compiler with high optimization flags:
 gcc -O3 -std=c99 octomark.c -o octomark
 ```
 
-### Usage as a CLI / Benchmark
-
-Running the built binary executes the internal performance benchmark:
+### Usage as a CLI
 
 ```bash
-./octomark
+./octomark < EXAMPLE.md
 ```
 
+### Example Input
+
+`EXAMPLE.md` includes a comprehensive syntax sample, including mixed and nested
+constructs.
+
+### Makefile Shortcuts
+
+```bash
+make
+make benchmark
+make test
+```
 ### Integration
 
 To use OctoMark in your own project, include the logic from `octomark.c` (or define `OCTOMARK_NO_MAIN` to include it as a header-like file).
@@ -82,7 +102,7 @@ int main() {
 A correctness test suite is provided in `test.c` which mirrors the JavaScript benchmark suite.
 
 ```bash
-gcc -O3 -std=c99 test.c -o test_runner
+make test
 ./test_runner
 ```
 
