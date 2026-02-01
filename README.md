@@ -1,5 +1,9 @@
 # OctoMark
 
+<p align="center">
+  <img width="300" src="octomark.webp">
+</p>
+
 OctoMark is an ultra-high performance, streaming Markdown parser written in pure C99. It is designed for environments where parsing speed and memory efficiency are critical, such as real-time editors, high-traffic servers, or resource-constrained systems.
 
 ## Key Features
