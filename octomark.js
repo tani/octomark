@@ -6,6 +6,11 @@
 class OctoMark {
     constructor() {
         this.escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+        this.specialChars = new Uint8Array(256);
+        const specials = "\\['*`&<>\"_";
+        for (let i = 0; i < specials.length; i++) {
+            this.specialChars[specials.charCodeAt(i)] = 1;
+        }
     }
 
     escape(str) {
@@ -64,8 +69,11 @@ class OctoMark {
             }
             const rel = line.substring(indent * 4);
 
+            // 8-character lookahead window for block dispatch (SIMD-ready logic)
+            const window = rel.substring(0, 8).padEnd(8, ' ');
+
             // --- Fenced Code Block ---
-            if (rel.startsWith('```')) {
+            if (window[0] === '`' && window[1] === '`' && window[2] === '`') {
                 while (listStack.length) {
                     output += "</ul>\n";
                     listStack.pop();
@@ -93,7 +101,7 @@ class OctoMark {
             }
 
             // --- Unordered Lists ---
-            if (rel.startsWith('- ')) {
+            if (window[0] === '-' && window[1] === ' ') {
                 // Adjust list depth
                 while (listStack.length < indent + 1) {
                     output += "<ul>\n";
@@ -104,16 +112,16 @@ class OctoMark {
                     listStack.pop();
                 }
 
-                const content = rel.substring(2);
-                const isTask = content.startsWith('[ ] ') || content.startsWith('[x] ');
+                // Task list detection using window
+                const isTask = window[2] === '[' && (window[3] === ' ' || window[3] === 'x') && window[4] === ']';
 
                 if (isTask) {
-                    const isChecked = content[1] === 'x';
+                    const isChecked = window[3] === 'x';
                     const checkedAttr = isChecked ? "checked" : "";
-                    const taskContent = content.substring(4);
+                    const taskContent = rel.substring(6); // "- [x] " is 6 chars
                     output += `<li><input type="checkbox" ${checkedAttr} disabled> ${this.parseInline(taskContent)}</li>\n`;
                 } else {
-                    output += `<li>${this.parseInline(content)}</li>\n`;
+                    output += `<li>${this.parseInline(rel.substring(2))}</li>\n`;
                 }
                 continue;
             } else if (listStack.length) {
@@ -125,15 +133,13 @@ class OctoMark {
             }
 
             // --- Block Elements ---
-            if (rel.startsWith('# ')) {
-                const headingText = rel.substring(2);
-                output += `<h1>${this.parseInline(headingText)}</h1>\n`;
-            } else if (rel.startsWith('> ')) {
-                const quoteText = rel.substring(2);
-                output += `<blockquote>${this.parseInline(quoteText)}</blockquote>\n`;
-            } else if (rel === '---') {
+            if (window[0] === '#' && window[1] === ' ') {
+                output += `<h1>${this.parseInline(rel.substring(2))}</h1>\n`;
+            } else if (window[0] === '>' && window[1] === ' ') {
+                output += `<blockquote>${this.parseInline(rel.substring(2))}</blockquote>\n`;
+            } else if (window[0] === '-' && window[1] === '-' && window[2] === '-' && trimmed === '---') {
                 output += "<hr>\n";
-            } else if (rel[0] === '|') {
+            } else if (window[0] === '|') {
                 // Common cell splitting logic
                 const splitRow = (l) => {
                     let s = l.trim();
@@ -212,16 +218,23 @@ class OctoMark {
         let res = "";
         let i = 0;
         const len = text.length;
+        const specs = this.specialChars;
 
         while (i < len) {
             let start = i;
 
-            // Fast Scan for Special Characters
-            while (i < len) {
-                const c = text[i];
-                if (c === '\\' || c === '[' || c === '*' || c === '`' ||
-                    c === '&' || c === '<' || c === '>' || c === '"' ||
-                    c === "'" || c === "_") break;
+            // --- SIMD-ready: 8-character jump scan ---
+            // Skip plain text in chunks of 8 to minimize branch overhead
+            while (i + 7 < len) {
+                if (specs[text.charCodeAt(i)] || specs[text.charCodeAt(i + 1)] ||
+                    specs[text.charCodeAt(i + 2)] || specs[text.charCodeAt(i + 3)] ||
+                    specs[text.charCodeAt(i + 4)] || specs[text.charCodeAt(i + 5)] ||
+                    specs[text.charCodeAt(i + 6)] || specs[text.charCodeAt(i + 7)]) break;
+                i += 8;
+            }
+
+            // Finish scanning the residual plain text
+            while (i < len && !specs[text.charCodeAt(i)]) {
                 i++;
             }
 
@@ -231,9 +244,11 @@ class OctoMark {
 
             if (i >= len) break;
 
-            const char = text[i];
+            // --- Window-based Dispatch (8-char lookahead) ---
+            const peek = text.substring(i, i + 8).padEnd(8, ' ');
+            const char = peek[0];
 
-            // --- Escaping ---
+            // Escaping
             if (char === '\\' && i + 1 < len) {
                 const escaped = text[i + 1];
                 res += this.escapeMap[escaped] || escaped;
@@ -241,14 +256,13 @@ class OctoMark {
                 continue;
             }
 
-            // --- Links [text](url) ---
+            // Links [text](url)
             if (char === '[') {
                 let closeBracket = text.indexOf(']', i + 1);
                 if (closeBracket !== -1 && text[closeBracket + 1] === '(') {
                     let closeParen = text.indexOf(')', closeBracket + 2);
                     if (closeParen !== -1) {
                         const url = text.substring(closeBracket + 2, closeParen);
-                        // Ensure URL has no spaces
                         if (url.indexOf(' ') === -1 && url.indexOf('\t') === -1) {
                             const linkText = text.substring(i + 1, closeBracket);
                             res += `<a href="${this.escape(url)}">${this.parseInline(linkText)}</a>`;
@@ -259,8 +273,8 @@ class OctoMark {
                 }
             }
 
-            // --- Bold **text** ---
-            if (char === '*' && text[i + 1] === '*') {
+            // Bold **text** (Peek helps here)
+            if (char === '*' && peek[1] === '*') {
                 let closeBold = text.indexOf('**', i + 2);
                 if (closeBold !== -1) {
                     const boldText = text.substring(i + 2, closeBold);
@@ -270,7 +284,7 @@ class OctoMark {
                 }
             }
 
-            // --- Italic _text_ ---
+            // Italic _text_
             if (char === '_') {
                 let closeItalic = text.indexOf('_', i + 1);
                 if (closeItalic !== -1) {
@@ -281,7 +295,7 @@ class OctoMark {
                 }
             }
 
-            // --- Inline Code `text` ---
+            // Inline Code `text`
             if (char === '`') {
                 let closeCode = text.indexOf('`', i + 1);
                 if (closeCode !== -1) {
