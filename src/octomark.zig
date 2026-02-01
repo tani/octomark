@@ -27,26 +27,6 @@ const BlockEntry = struct {
     indent_level: i32,
 };
 
-pub const InlineCache = struct {
-    underscore_fail: usize = std.math.maxInt(usize),
-    double_asterisk_fail: usize = std.math.maxInt(usize),
-    double_tilde_fail: usize = std.math.maxInt(usize),
-    link_fail: usize = std.math.maxInt(usize),
-    math_fail: usize = std.math.maxInt(usize),
-    html_fail: usize = std.math.maxInt(usize),
-    backtick_fail: [16]usize = [_]usize{std.math.maxInt(usize)} ** 16,
-
-    pub fn reset(self: *InlineCache) void {
-        self.underscore_fail = std.math.maxInt(usize);
-        self.double_asterisk_fail = std.math.maxInt(usize);
-        self.double_tilde_fail = std.math.maxInt(usize);
-        self.link_fail = std.math.maxInt(usize);
-        self.math_fail = std.math.maxInt(usize);
-        self.html_fail = std.math.maxInt(usize);
-        @memset(&self.backtick_fail, std.math.maxInt(usize));
-    }
-};
-
 const Buffer = std.ArrayListUnmanaged(u8);
 const AllocError = std.mem.Allocator.Error;
 const ParseError = AllocError || std.fs.File.WriteError || error{ NestingTooDeep, TooManyTableColumns };
@@ -68,7 +48,6 @@ pub const OctomarkParser = struct {
     table_header_storage: Buffer = .{},
     table_header_pending: bool = false,
     allocator: std.mem.Allocator = undefined,
-    inline_cache: InlineCache = .{},
 
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
@@ -217,7 +196,6 @@ pub const OctomarkParser = struct {
     }
 
     fn renderInline(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
-        parser.inline_cache.reset();
         try parser.parseInlineContent(text, output, 0);
     }
 
@@ -246,18 +224,12 @@ pub const OctomarkParser = struct {
             if (i > start) try output.writeAll(text[start..i]);
             if (i >= length) break;
 
-            const abs_pos = abs_offset + i;
-
             if (text[i] == '<' and parser.options.enable_html) {
-                if (abs_pos < parser.inline_cache.html_fail) {
-                    const tag_len = parseHtmlTag(text[i..]);
-                    if (tag_len > 0) {
-                        try output.writeAll(text[i .. i + tag_len]);
-                        i += tag_len;
-                        continue;
-                    } else {
-                        parser.inline_cache.html_fail = abs_pos;
-                    }
+                const tag_len = parseHtmlTag(text[i..]);
+                if (tag_len > 0) {
+                    try output.writeAll(text[i .. i + tag_len]);
+                    i += tag_len;
+                    continue;
                 }
             }
 
@@ -273,12 +245,8 @@ pub const OctomarkParser = struct {
             } else if (c == '_') {
                 const content_start = i + 1;
                 var found_at: ?usize = null;
-                if (abs_pos < parser.inline_cache.underscore_fail) {
-                    if (std.mem.indexOfScalar(u8, text[content_start..], '_')) |offset| {
-                        found_at = content_start + offset;
-                    } else {
-                        parser.inline_cache.underscore_fail = abs_pos;
-                    }
+                if (std.mem.indexOfScalar(u8, text[content_start..], '_')) |offset| {
+                    found_at = content_start + offset;
                 }
 
                 if (found_at) |j| {
@@ -292,12 +260,8 @@ pub const OctomarkParser = struct {
             } else if (c == '*' and i + 1 < length and text[i + 1] == '*') {
                 const content_start = i + 2;
                 var found_at: ?usize = null;
-                if (abs_pos < parser.inline_cache.double_asterisk_fail) {
-                    if (std.mem.indexOf(u8, text[content_start..], "**")) |offset| {
-                        found_at = content_start + offset;
-                    } else {
-                        parser.inline_cache.double_asterisk_fail = abs_pos;
-                    }
+                if (std.mem.indexOf(u8, text[content_start..], "**")) |offset| {
+                    found_at = content_start + offset;
                 }
 
                 if (found_at) |j| {
@@ -309,58 +273,43 @@ pub const OctomarkParser = struct {
                     handled = false;
                 }
             } else if (c == '`') {
-                var backtick_count: usize = 1;
-                while (i + backtick_count < length and text[i + backtick_count] == '`') : (backtick_count += 1) {}
-                const content_start = i + backtick_count;
+                var fence_len: usize = 1;
+                while (i + fence_len < length and text[i + fence_len] == '`') : (fence_len += 1) {}
 
-                var found = false;
-                if (backtick_count <= 16 and abs_pos < parser.inline_cache.backtick_fail[backtick_count - 1]) {
-                    var k = content_start;
-                    while (k + backtick_count <= length) {
-                        if (std.mem.indexOfScalarPos(u8, text, k, '`')) |m| {
-                            var match = true;
-                            var n: usize = 0;
-                            while (n < backtick_count) : (n += 1) {
-                                if (m + n >= length or text[m + n] != '`') {
-                                    match = false;
-                                    break;
-                                }
-                            }
-                            if (match) {
-                                // Match must be EXACTLY backtick_count
-                                if (m + backtick_count < length and text[m + backtick_count] == '`') {
-                                    k = m + 1;
-                                    while (k < length and text[k] == '`') k += 1;
-                                    continue;
-                                }
-                                found = true;
-                                try output.writeAll("<code>");
-                                if (m > content_start) try parser.appendEscapedText(text[content_start..m], output);
-                                try output.writeAll("</code>");
-                                i = m + backtick_count - 1;
-                                break;
-                            } else {
-                                k = m + 1;
-                            }
-                        } else break;
-                    }
-                    if (!found and backtick_count <= 16) {
-                        parser.inline_cache.backtick_fail[backtick_count - 1] = abs_pos;
+                const content_start = i + fence_len;
+                var found_at: ?usize = null;
+                // Simple search for matching fence
+                var scan_pos = content_start;
+                while (scan_pos < length) {
+                    if (std.mem.indexOfScalar(u8, text[scan_pos..], '`')) |offset| {
+                        const backtick_pos = scan_pos + offset;
+                        var end_fence_len: usize = 1;
+                        var k = backtick_pos + 1;
+                        while (k < length and text[k] == '`') : (k += 1) end_fence_len += 1;
+
+                        if (end_fence_len == fence_len) {
+                            found_at = backtick_pos;
+                            break;
+                        }
+                        scan_pos = backtick_pos + end_fence_len;
+                    } else {
+                        break;
                     }
                 }
 
-                if (!found) {
+                if (found_at) |j| {
+                    try output.writeAll("<code>");
+                    try parser.appendEscapedText(text[content_start..j], output);
+                    try output.writeAll("</code>");
+                    i = j + fence_len - 1;
+                } else {
                     handled = false;
                 }
             } else if (c == '~' and i + 1 < length and text[i + 1] == '~') {
                 const content_start = i + 2;
                 var found_at: ?usize = null;
-                if (abs_pos < parser.inline_cache.double_tilde_fail) {
-                    if (std.mem.indexOf(u8, text[content_start..], "~~")) |offset| {
-                        found_at = content_start + offset;
-                    } else {
-                        parser.inline_cache.double_tilde_fail = abs_pos;
-                    }
+                if (std.mem.indexOf(u8, text[content_start..], "~~")) |offset| {
+                    found_at = content_start + offset;
                 }
 
                 if (found_at) |j| {
@@ -372,80 +321,73 @@ pub const OctomarkParser = struct {
                     handled = false;
                 }
             } else if (c == '!' or c == '[') {
-                const start_idx = i;
-                if (c == '!') i += 1;
-                var found_link = false;
-                if (abs_pos < parser.inline_cache.link_fail) {
-                    if (i < length and text[i] == '[') {
-                        i += 1;
-                        const link_text_start = i;
-                        var depth: usize = 1;
-                        while (i < length and depth > 0) {
-                            if (text[i] == '[') depth += 1 else if (text[i] == ']') depth -= 1;
-                            i += 1;
-                        }
-                        if (depth == 0 and i < length and text[i] == '(') {
-                            const link_text_len = i - link_text_start - 1;
-                            i += 1;
-                            const url_start = i;
-                            while (i < length and text[i] != ')' and text[i] != ' ') : (i += 1) {}
-                            const url_len = i - url_start;
-                            while (i < length and text[i] != ')') : (i += 1) {}
-                            if (i < length and text[i] == ')') {
-                                if (c == '!') {
-                                    try output.writeAll("<img src=\"");
-                                    try output.writeAll(text[url_start .. url_start + url_len]);
-                                    try output.writeAll("\" alt=\"");
-                                    try output.writeAll(text[link_text_start .. link_text_start + link_text_len]);
-                                    try output.writeAll("\">");
-                                } else {
-                                    try output.writeAll("<a href=\"");
-                                    try output.writeAll(text[url_start .. url_start + url_len]);
-                                    try output.writeAll("\">");
-                                    try parser.parseInlineContent(text[link_text_start .. link_text_start + link_text_len], output, abs_offset + link_text_start);
-                                    try output.writeAll("</a>");
-                                }
-                                found_link = true;
+                // Simplification: Combined Logic for Links and Images
+                if (c == '!' and (i + 1 >= length or text[i + 1] != '[')) {
+                    handled = false;
+                } else {
+                    const is_image = (c == '!');
+                    const bracket_start_idx = if (is_image) i + 2 else i + 1;
+                    var bracket_depth: usize = 1;
+                    var bracket_end_idx: usize = 0;
+                    var k = bracket_start_idx;
+                    while (k < length) : (k += 1) {
+                        if (text[k] == '[') {
+                            bracket_depth += 1;
+                        } else if (text[k] == ']') {
+                            bracket_depth -= 1;
+                            if (bracket_depth == 0) {
+                                bracket_end_idx = k;
+                                break;
                             }
                         }
                     }
-                    if (!found_link) {
-                        // Only cache failure if there are no more ']' or no more '('
-                        if (std.mem.indexOfScalar(u8, text[start_idx..], ']') == null or
-                            std.mem.indexOfScalar(u8, text[start_idx..], '(') == null)
-                        {
-                            parser.inline_cache.link_fail = abs_pos;
+
+                    if (bracket_end_idx > 0 and bracket_end_idx + 1 < length and text[bracket_end_idx + 1] == '(') {
+                        const url_start_idx = bracket_end_idx + 2;
+                        if (std.mem.indexOfScalar(u8, text[url_start_idx..], ')')) |offset| {
+                            const url_end_idx = url_start_idx + offset;
+                            const label = text[bracket_start_idx..bracket_end_idx];
+                            const url = text[url_start_idx..url_end_idx];
+
+                            if (is_image) {
+                                try output.writeAll("<img src=\"");
+                                try output.writeAll(url);
+                                try output.writeAll("\" alt=\"");
+                                try output.writeAll(label);
+                                try output.writeAll("\">");
+                            } else {
+                                try output.writeAll("<a href=\"");
+                                try output.writeAll(url);
+                                try output.writeAll("\">");
+                                try parser.parseInlineContent(label, output, abs_offset + bracket_start_idx);
+                                try output.writeAll("</a>");
+                            }
+                            i = url_end_idx;
+                        } else {
+                            handled = false;
                         }
+                    } else {
+                        handled = false;
                     }
                 }
-
-                if (!found_link) {
-                    i = start_idx;
-                    handled = false;
-                }
-            } else if (c == 'h' and text.len - i >= 7 and
-                std.mem.startsWith(u8, text[i..], "http") and
-                ((text.len - i >= 7 and std.mem.startsWith(u8, text[i + 4 ..], "://")) or
-                    (text.len - i >= 8 and std.mem.startsWith(u8, text[i + 4 ..], "s://"))))
-            {
-                const url_start = i;
-                while (i < length and !std.ascii.isWhitespace(text[i]) and text[i] != '<' and text[i] != '>') : (i += 1) {}
+            } else if (c == 'h' and i + 4 < length and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
+                // Auto-link logic (simplified)
+                var k = i;
+                while (k < length and !std.ascii.isWhitespace(text[k]) and text[k] != '<' and text[k] != '>') : (k += 1) {}
+                const url = text[i..k];
                 try output.writeAll("<a href=\"");
-                try output.writeAll(text[url_start..i]);
+                try output.writeAll(url);
                 try output.writeAll("\">");
-                try output.writeAll(text[url_start..i]);
+                try output.writeAll(url);
                 try output.writeAll("</a>");
-                i -= 1;
+                i = k - 1;
             } else if (c == '$') {
                 const content_start = i + 1;
                 var found_at: ?usize = null;
-                if (abs_pos < parser.inline_cache.math_fail) {
-                    if (std.mem.indexOfScalar(u8, text[content_start..], '$')) |offset| {
-                        found_at = content_start + offset;
-                    } else {
-                        parser.inline_cache.math_fail = abs_pos;
-                    }
+                if (std.mem.indexOfScalar(u8, text[content_start..], '$')) |offset| {
+                    found_at = content_start + offset;
                 }
+
                 if (found_at) |j| {
                     try output.writeAll("<span class=\"math\">");
                     try parser.appendEscapedText(text[content_start..j], output);
@@ -459,14 +401,13 @@ pub const OctomarkParser = struct {
             }
 
             if (!handled) {
-                const entity = parser.html_escape_map[c];
+                const entity = parser.html_escape_map[text[i]];
                 if (entity) |value| {
                     try output.writeAll(value);
                 } else {
-                    try output.writeByte(c);
+                    try output.writeByte(text[i]);
                 }
             }
-
             i += 1;
         }
     }
@@ -623,10 +564,20 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseTable(parser: *OctomarkParser, line_content: []const u8, _: []const u8, _: usize, output: anytype) !bool {
-        const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
-        if (trimmed_line.len > 0 and trimmed_line[0] == '|') {
-            if (parser.currentBlockType() == .table) {
+    fn parseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
+        // 1. If we are already IN a table, process body rows strictly.
+        if (parser.currentBlockType() == .table) {
+            const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
+            // Quick pipe check for body row
+            var has_pipe = false;
+            for (trimmed_line) |c| {
+                if (c == '|') {
+                    has_pipe = true;
+                    break;
+                }
+            }
+
+            if (has_pipe) {
                 var body_cells: [64][]const u8 = undefined;
                 const body_count = splitTableRowCells(line_content, &body_cells);
                 try output.writeAll("<tr>");
@@ -646,9 +597,40 @@ pub const OctomarkParser = struct {
                 }
                 try output.writeAll("</tr>\n");
                 return true;
+            } else {
+                // No pipe = end of table
+                try parser.renderAndCloseTopBlock(output);
+                // Continue to process this line as something else (return false)
+                return false;
             }
+        }
 
-            // Lookahead for separator row
+        // 2. Optimization: Quick check for pipe in potential header
+        // Optimization: Quick check for pipe using optimized search
+        const has_pipe = (std.mem.indexOfScalar(u8, line_content, '|') != null);
+
+        // 3. If NOT pending header, perform lookahead to decide if we should start pending
+        if (!parser.table_header_pending) {
+            if (!has_pipe) return false;
+
+            // Lookahead: Check if the NEXT line is a separator to avoid unnecessary buffering.
+            if (isNextLineTableSeparator(full_data, current_pos)) {
+                // Fallthrough to buffer this header line as it will likely form a valid table.
+            } else {
+                return false;
+            }
+        }
+
+        const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
+
+        // 4. If we are pending (or just decided to be pending via lookahead fall-through)
+        // Check if THIS line is a separator (completing a header) or needs to be buffered
+
+        // Wait, if !pending and lookahead passed, we just want to BUFFER it.
+        // We shouldn't check if current line is separator immediately if we just decided it's a header line.
+
+        if (parser.table_header_pending) {
+            // Lookahead for separator row (current line is strictly the proposed separator)
             const is_separator = blk: {
                 if (trimmed_line.len < 3) break :blk false;
                 var has_dash = false;
@@ -662,14 +644,14 @@ pub const OctomarkParser = struct {
                 break :blk has_dash;
             };
 
-            if (is_separator and parser.table_header_pending) {
+            if (is_separator) {
+                // ... Create table ...
                 try parser.closeLeafBlocks(output);
                 try output.writeAll("<table><thead><tr>");
                 parser.table_column_count = 0;
 
-                // Parse alignment from separator row
                 var p: usize = 0;
-                if (trimmed_line[0] == '|') p += 1;
+                if (trimmed_line.len > 0 and trimmed_line[0] == '|') p += 1;
                 while (p < trimmed_line.len) {
                     while (p < trimmed_line.len and std.ascii.isWhitespace(trimmed_line[p])) : (p += 1) {}
                     if (p >= trimmed_line.len) break;
@@ -686,13 +668,12 @@ pub const OctomarkParser = struct {
                         }
                     }
 
-                    if (parser.table_column_count < parser.table_alignments.len) {
-                        parser.table_alignments[parser.table_column_count] = col_align;
-                        parser.table_column_count += 1;
-                    } else {
-                        // Cap at max columns
-                        break;
+                    if (parser.table_column_count >= parser.table_alignments.len) {
+                        return error.TooManyTableColumns;
                     }
+                    parser.table_alignments[parser.table_column_count] = col_align;
+                    parser.table_column_count += 1;
+
                     if (p < trimmed_line.len and trimmed_line[p] == '|') p += 1;
                 }
 
@@ -718,22 +699,17 @@ pub const OctomarkParser = struct {
                 return true;
             }
 
-            // Not a separator, could be a header
-            if (parser.table_header_pending) {
-                // Flush previous pending header as paragraph
-                try parser.processParagraph(parser.table_header_storage.items, false, false, output);
-            }
-            parser.table_header_storage.clearRetainingCapacity();
-            try parser.table_header_storage.appendSlice(parser.allocator, line_content);
-            parser.table_header_pending = true;
-            return true;
-        }
-
-        if (parser.table_header_pending) {
+            // Pending, but not a separator? Then previous expectation was wrong.
             parser.table_header_pending = false;
             try parser.processParagraph(parser.table_header_storage.items, false, false, output);
+            return false;
         }
-        return false;
+
+        // 5. Buffer logic (only reached if !pending initially, and lookahead passed successfully)
+        parser.table_header_storage.clearRetainingCapacity();
+        try parser.table_header_storage.appendSlice(parser.allocator, line_content);
+        parser.table_header_pending = true;
+        return true;
     }
 
     fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
@@ -832,6 +808,34 @@ pub const OctomarkParser = struct {
 
         try parser.processParagraph(line_content, is_dl, is_list, output);
         return false;
+    }
+
+    fn isNextLineTableSeparator(full_data: []const u8, start_pos: usize) bool {
+        if (start_pos >= full_data.len) return true; // Treat EOF as buffering safe (incomplete input)
+
+        const next_line_end = if (std.mem.indexOfScalar(u8, full_data[start_pos..], '\n')) |nl|
+            start_pos + nl
+        else
+            full_data.len;
+
+        const next_line = full_data[start_pos..next_line_end];
+        const trimmed_next = std.mem.trim(u8, next_line, &std.ascii.whitespace);
+
+        if (trimmed_next.len < 3) return false;
+
+        var has_dash = false;
+        var all_valid = true;
+        for (trimmed_next) |c| {
+            if (c == '-' or c == ':' or c == '|') {
+                if (c == '-') has_dash = true;
+                continue;
+            }
+            if (!std.ascii.isWhitespace(c)) {
+                all_valid = false;
+                break;
+            }
+        }
+        return (all_valid and has_dash);
     }
 };
 
