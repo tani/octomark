@@ -82,7 +82,88 @@ typedef struct {
   BlockEntry block_stack[MAX_BLOCK_NESTING];
   size_t stack_depth;
   StringBuffer pending_buffer;
+  bool enable_html;
 } OctomarkParser;
+
+static size_t try_parse_html_tag(const char *text, size_t len) {
+  if (len < 3 || text[0] != '<')
+    return 0;
+
+  size_t i = 1;
+
+  // 1. Comments <!-- ... -->
+  if (i + 2 < len && text[i] == '!' && text[i + 1] == '-' && text[i + 2] == '-') {
+    i += 3;
+    while (i + 2 < len) {
+      if (text[i] == '-' && text[i + 1] == '-' && text[i + 2] == '>')
+        return i + 3;
+      i++;
+    }
+    return 0; // Unclosed comment
+  }
+
+  // 2. CDATA <![CDATA[ ... ]]>
+  if (i + 7 < len && strncmp(text + i, "![CDATA[", 8) == 0) {
+    i += 8;
+    while (i + 2 < len) {
+      if (text[i] == ']' && text[i + 1] == ']' && text[i + 2] == '>')
+        return i + 3;
+      i++;
+    }
+    return 0;
+  }
+
+  // 3. Processing Instructions <? ... ?>
+  if (i < len && text[i] == '?') {
+    i++;
+    while (i + 1 < len) {
+      if (text[i] == '?' && text[i + 1] == '>')
+        return i + 2;
+      i++;
+    }
+    return 0;
+  }
+
+  // 4. Doctype <!DOCTYPE ... >
+  if (i < len && text[i] == '!') {
+    i++;
+    while (i < len) {
+      if (text[i] == '>')
+        return i + 1;
+      i++;
+    }
+    return 0;
+  }
+
+  // 5. Standard Tags (Open </tag> or <tag>)
+  if (i < len && text[i] == '/')
+    i++;
+
+  if (i >= len || !isalpha(text[i]))
+    return 0;
+
+  while (i < len && (isalnum(text[i]) || text[i] == '-' || text[i] == ':'))
+    i++;
+
+  // Attributes
+  while (i < len && text[i] != '>') {
+    char c = text[i];
+    if (c == '"' || c == '\'') {
+      char quote = c;
+      i++;
+      while (i < len && text[i] != quote)
+        i++;
+      if (i >= len)
+        return 0; // Unclosed quote
+    }
+    i++;
+  }
+
+  if (i < len && text[i] == '>')
+    return i + 1;
+
+  return 0;
+}
 
 void octomark_init(OctomarkParser *parser) {
   memset(parser, 0, sizeof(OctomarkParser));
@@ -94,6 +175,7 @@ void octomark_init(OctomarkParser *parser) {
   parser->html_escape_map['"'] = "&quot;";
   parser->html_escape_map['\''] = "&#39;";
   string_buffer_init(&parser->pending_buffer, 4096);
+  parser->enable_html = false;
 }
 void octomark_free(OctomarkParser *parser) { string_buffer_free(&parser->pending_buffer); }
 
@@ -194,6 +276,16 @@ static void parse_inline_content(const OctomarkParser *restrict parser, const ch
     }
     
     if (i >= length) break;
+    
+    // Check for HTML Tags if enabled
+    if (text[i] == '<' && parser->enable_html) {
+      size_t tag_len = try_parse_html_tag(text + i, length - i);
+      if (tag_len > 0) {
+        string_buffer_append_string_n(output, text + i, tag_len);
+        i += tag_len;
+        continue;
+      }
+    }
     
     char c = text[i];
     if (c == '\\') {

@@ -87,6 +87,33 @@ TestCase tests[] = {
     {"Backslash Hard Break", "Line 1\\\nLine 2",
      "<p>Line 1<br>\nLine 2</p>\n"}};
 
+void run_html_test() {
+  printf("Running HTML Support Test...\n");
+  OctomarkParser parser;
+  StringBuffer out;
+  string_buffer_init(&out, 4096);
+  octomark_init(&parser);
+  parser.enable_html = true;
+  
+  const char *input = "<b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> <invalid\n"
+                      "Mixed with **Markdown**: <i>Italic</i> and `code`";
+  const char *expected = "<p><b>Bold</b> <DIV>Mixed</DIV> <sPaN class=\"foo\">Span</sPaN> <br/> <!-- Comment --> &lt;invalid\nMixed with <strong>Markdown</strong>: <i>Italic</i> and <code>code</code></p>\n";
+  
+  octomark_feed(&parser, input, strlen(input), &out);
+  octomark_finish(&parser, &out);
+  
+  if (strcmp(out.data, expected) == 0) {
+    printf("[PASS] HTML Support Test\n");
+  } else {
+    printf("[FAIL] HTML Support Test\n");
+    printf("Expected: [%s]\n", expected);
+    printf("Actual:   [%s]\n", out.data);
+  }
+  
+  string_buffer_free(&out);
+  octomark_free(&parser);
+}
+
 int main() {
   printf("--- OctoMark C Correctness Tests ---\n");
   OctomarkParser parser;
@@ -110,6 +137,8 @@ int main() {
     }
     octomark_free(&parser);
   }
+
+  run_html_test();
 
   printf("\nTest Summary: %d Passed, %d Failed.\n", passed, total - passed);
   string_buffer_free(&out);
