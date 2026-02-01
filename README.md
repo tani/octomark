@@ -24,7 +24,7 @@ streaming throughput.
 
 ```bash
 make benchmark
-./benchmark/benchmark
+./benchmark/octomark_benchmark
 ```
 
 Recent run (EXAMPLE.md on this machine):
@@ -99,11 +99,11 @@ int main() {
 
 ## Testing
 
-A correctness test suite is provided in `test/test.c` which mirrors the JavaScript benchmark suite.
+A correctness test suite is provided in `test/octomark.c` which mirrors the JavaScript benchmark suite.
 
 ```bash
 make test
-./test_runner
+./test/octomark_test
 ```
 
 ## License
