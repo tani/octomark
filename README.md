@@ -4,12 +4,12 @@
   <img width="300" src="octomark.webp">
 </p>
 
-OctoMark is an ultra-high performance, streaming Markdown parser written in pure C99. It is designed for environments where parsing speed and memory efficiency are critical, such as real-time editors, high-traffic servers, or resource-constrained systems.
+OctoMark is an ultra-high performance, streaming Markdown parser written in Zig. It is designed for environments where parsing speed and memory efficiency are critical, such as real-time editors, high-traffic servers, or resource-constrained systems.
 
 ## Key Features
 
 - **Extreme Performance**: Sustained throughput depends on input; see the benchmark section for local measurement.
-- **Pure C99**: No external dependencies beyond the C standard library. Highly portable.
+- **Pure Zig**: No external dependencies beyond Zig's standard library. Highly portable.
 - **Streaming First**: Built-in support for chunked data processing using a persistent state and leftover buffer management.
 - **Buffer Passing Architecture**: Minimizes memory allocations by using a flexible buffer management system.
 - **Turbo Optimized**:
@@ -19,20 +19,19 @@ OctoMark is an ultra-high performance, streaming Markdown parser written in pure
 
 ## Performance Benchmark
 
-The benchmark runner (`octomark_benchmark`) repeats `EXAMPLE.md` to reach target sizes and measures
+The benchmark runner (`octomark-benchmark`) repeats `EXAMPLE.md` to reach target sizes and measures
 streaming throughput.
 
 ```bash
-make octomark_benchmark
-./octomark_benchmark
+zig build -Doptimize=ReleaseFast bench
 ```
 
-Recent run (EXAMPLE.md on this machine):
+Recent run (EXAMPLE.md on this machine, ReleaseFast):
 
-- 10 MB: 18.77 ms (0.52 GB/s)
-- 50 MB: 93.41 ms (0.52 GB/s)
-- 100 MB: 185.88 ms (0.53 GB/s)
-- 200 MB: 381.44 ms (0.51 GB/s)
+- 10 MB: 21.74 ms (0.45 GB/s)
+- 50 MB: 79.83 ms (0.61 GB/s)
+- 100 MB: 158.95 ms (0.61 GB/s)
+- 200 MB: 325.69 ms (0.60 GB/s)
 
 ## Syntax Support
 
@@ -44,18 +43,16 @@ OctoMark supports GFM-like Markdown with extensions:
 
 ## Getting Started
 
-### Compilation
-
-Use any C99-compliant compiler with high optimization flags:
+### Build
 
 ```bash
-gcc -O3 -std=c99 src/octomark.c -o octomark
+zig build -Doptimize=ReleaseFast
 ```
 
-### Usage as a CLI
+### Run as a CLI
 
 ```bash
-./octomark < EXAMPLE.md
+zig build run -- < EXAMPLE.md
 ```
 
 ### Example Input
@@ -63,47 +60,36 @@ gcc -O3 -std=c99 src/octomark.c -o octomark
 `EXAMPLE.md` includes a comprehensive syntax sample, including mixed and nested
 constructs.
 
-### Makefile Shortcuts
-
-```bash
-make
-make octomark_benchmark
-make octomark_test
-```
 ### Integration
 
-To use OctoMark in your own project, include the logic from `src/octomark.c` (or define `OCTOMARK_NO_MAIN` to include it as a header-like file).
+To use OctoMark in your own Zig project, import the module and drive the parser with a `FastWriter`.
 
-```c
-#define OCTOMARK_NO_MAIN
-#include "src/octomark.c"
+```zig
+const std = @import("std");
+const octomark = @import("octomark");
 
-int main() {
-    OctomarkParser parser;
-    octomark_init(&parser);
-    
-    StringBuffer output;
-    string_buffer_init(&output, 4096);
-    
-    const char *chunk = "# Hello Octo\nStream data here.";
-    octomark_feed(&parser, chunk, strlen(chunk), &output);
-    octomark_finish(&parser, &output);
-    
-    printf("%s", output.data);
-    
-    string_buffer_free(&output);
-    octomark_free(&parser);
-    return 0;
+pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    var parser: octomark.OctomarkParser = undefined;
+    try parser.init(allocator);
+    defer parser.deinit(allocator);
+
+    var out_buf: [64 * 1024]u8 = undefined;
+    var writer = octomark.FastWriter.fromStdout(&out_buf);
+
+    const input = "# Hello Octo\nStream data here.";
+    try parser.feed(input, &writer, allocator);
+    try parser.finish(&writer);
+    try writer.flush();
 }
 ```
 
 ## Testing
 
-A correctness test suite is provided in `test/octomark.c` and runs via `test/octomark_test`.
+A correctness test suite is provided in `src/test.zig`.
 
 ```bash
-make octomark_test
-./octomark_test
+zig build test
 ```
 
 ## License
