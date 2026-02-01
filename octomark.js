@@ -16,19 +16,37 @@ class OctoMark {
     }
 
     escape(str) {
-        return str.replace(/[&<>"']/g, m => this.escapeMap[m]);
+        let res = "";
+        let last = 0;
+        for (let i = 0; i < str.length; i++) {
+            const char = str[i];
+            const escaped = this.escapeMap[char];
+            if (escaped) {
+                if (i > last) res += str.substring(last, i);
+                res += escaped;
+                last = i + 1;
+            }
+        }
+        if (last < str.length) res += str.substring(last);
+        return res;
     }
 
     parse(input) {
-        const lines = input.split('\n');
         let output = "";
         let inCodeBlock = false;
         let inTable = false;
         let tableAligns = [];
-        let listStack = []; // <ul> の階層管理用
+        let listStack = [];
 
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
+        let pos = 0;
+        const len = input.length;
+
+        while (pos < len) {
+            let next = input.indexOf('\n', pos);
+            if (next === -1) next = len;
+            const line = input.substring(pos, next);
+            pos = next + 1;
+
             const trimmed = line.trim();
 
             // --- 1. Indent Detection (Fixed 4-space) ---
@@ -47,7 +65,13 @@ class OctoMark {
                 if (inTable) { output += "</tbody></table>\n"; inTable = false; }
 
                 if (!inCodeBlock) {
-                    const langPart = relativeLine.substring(3).trim().split(' ')[0];
+                    let langPart = "";
+                    let k = 3;
+                    while (k < relativeLine.length && relativeLine[k] === ' ') k++;
+                    let start = k;
+                    while (k < relativeLine.length && relativeLine[k] !== ' ') k++;
+                    langPart = relativeLine.substring(start, k);
+
                     const langClass = langPart ? ` class="language-${this.escape(langPart)}"` : "";
                     output += `<pre><code${langClass}>`;
                 } else {
@@ -116,18 +140,23 @@ class OctoMark {
 
             // --- 6. Tables ---
             if (window[0] === '|') {
-                const nextLine = lines[i+1]?.trim() || "";
+                // Lookahead check for separator line
+                let nextSepPos = input.indexOf('\n', next + 1);
+                if (nextSepPos === -1) nextSepPos = len;
+                const nextLine = input.substring(next + 1, nextSepPos).trim();
+
                 if (!inTable && nextLine[0] === '|' && (nextLine[1] === '-' || nextLine[1] === ':')) {
                     output += "<table><thead><tr>";
                     const cells = this.splitCells(relativeLine);
-                    tableAligns = this.parseAligns(lines[i+1]);
+                    tableAligns = this.parseAligns(nextLine);
                     cells.forEach((c, idx) => {
                         const style = tableAligns[idx] ? ` style="text-align:${tableAligns[idx]}"` : "";
                         output += `<th${style}>${this.parseInline(c)}</th>`;
                     });
                     output += "</tr></thead><tbody>\n";
                     inTable = true;
-                    i++; continue;
+                    pos = nextSepPos + 1; // Skip the separator line
+                    continue;
                 } else if (inTable) {
                     output += "<tr>";
                     this.splitCells(relativeLine).forEach((c, idx) => {
@@ -166,7 +195,7 @@ class OctoMark {
                 if (code < 256 && this.specialChars[code]) break;
                 i++;
             }
-            
+
             if (i > start) {
                 res += text.substring(start, i);
             }
@@ -174,7 +203,7 @@ class OctoMark {
             if (i >= len) break;
 
             const char = text[i];
-            
+
             if (char === '\\' && i + 1 < len) {
                 const next = text[i + 1];
                 res += this.escapeMap[next] || next;
@@ -240,7 +269,7 @@ class OctoMark {
                     i = j + 1; continue;
                 }
             }
-            
+
             res += this.escapeMap[char] || char;
             i++;
         }
@@ -248,16 +277,36 @@ class OctoMark {
     }
 
     splitCells(line) {
-        return line.trim().replace(/^\||\|$/g, '').split('|').map(s => s.trim());
+        let start = 0;
+        let end = line.length;
+        while (start < end && (line[start] === ' ' || line[start] === '\t')) start++;
+        if (start < end && line[start] === '|') start++;
+        while (end > start && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--;
+        if (end > start && line[end - 1] === '|') end--;
+
+        const res = [];
+        let cur = start;
+        for (let i = start; i < end; i++) {
+            if (line[i] === '|') {
+                res.push(line.substring(cur, i).trim());
+                cur = i + 1;
+            }
+        }
+        res.push(line.substring(cur, end).trim());
+        return res;
     }
 
     parseAligns(line) {
-        return this.splitCells(line).map(c => {
-            if (c.startsWith(':') && c.endsWith(':')) return 'center';
-            if (c.endsWith(':')) return 'right';
-            if (c.startsWith(':')) return 'left';
-            return '';
-        });
+        const cells = this.splitCells(line);
+        const aligns = [];
+        for (let i = 0; i < cells.length; i++) {
+            const c = cells[i];
+            if (c.startsWith(':') && c.endsWith(':')) aligns.push('center');
+            else if (c.endsWith(':')) aligns.push('right');
+            else if (c.startsWith(':')) aligns.push('left');
+            else aligns.push('');
+        }
+        return aligns;
     }
 }
 
