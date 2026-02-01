@@ -1,6 +1,5 @@
 #include <ctype.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,13 +9,15 @@ typedef struct {
   size_t size;
   size_t capacity;
 } Buffer;
-void buf_init(Buffer *b, size_t cap) {
+
+static void buf_init(Buffer *b, size_t cap) {
   b->data = (char *)malloc(cap);
   b->data[0] = '\0';
   b->size = 0;
   b->capacity = cap;
 }
-void buf_grow(Buffer *b, size_t m) {
+
+static void buf_grow(Buffer *b, size_t m) {
   if (b->capacity >= m)
     return;
   size_t n = b->capacity * 2;
@@ -25,13 +26,15 @@ void buf_grow(Buffer *b, size_t m) {
   b->data = (char *)realloc(b->data, n);
   b->capacity = n;
 }
-void buf_push(Buffer *b, char c) {
+
+static void buf_push(Buffer *b, char c) {
   if (b->size + 2 > b->capacity)
     buf_grow(b, b->size + 2);
   b->data[b->size++] = c;
   b->data[b->size] = '\0';
 }
-void buf_append_n(Buffer *b, const char *s, size_t n) {
+
+static void buf_append_n(Buffer *b, const char *s, size_t n) {
   if (n == 0)
     return;
   if (b->size + n + 1 > b->capacity)
@@ -40,24 +43,26 @@ void buf_append_n(Buffer *b, const char *s, size_t n) {
   b->size += n;
   b->data[b->size] = '\0';
 }
-void buf_append(Buffer *b, const char *s) { buf_append_n(b, s, strlen(s)); }
-void buf_free(Buffer *b) {
+
+static void buf_append(Buffer *b, const char *s) {
+  buf_append_n(b, s, strlen(s));
+}
+
+static void buf_free(Buffer *b) {
   free(b->data);
   b->data = NULL;
   b->size = b->capacity = 0;
 }
 
 #define MAX_DEPTH 32
-#define T_UL 0
-#define T_OL 1
-#define T_QUOTE 2
-#define T_DL 3
-#define T_DD 4
+enum { T_UL, T_OL, T_QUOTE, T_DL, T_DD };
 
 typedef struct {
   int type, indent;
 } Entry;
+
 typedef enum { ALIGN_NONE, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } Align;
+
 typedef struct {
   bool spec[256];
   const char *esc[256];
@@ -71,9 +76,8 @@ typedef struct {
 
 void octomark_init(OctoMark *om) {
   memset(om, 0, sizeof(OctoMark));
-  const char *s = "\\['*`&<>\"_~!$h";
-  for (int i = 0; s[i]; i++)
-    om->spec[(unsigned char)s[i]] = true;
+  for (const char *s = "\\['*`&<>\"_~!$h"; *s; s++)
+    om->spec[(unsigned char)*s] = true;
   om->esc['&'] = "&amp;";
   om->esc['<'] = "&lt;";
   om->esc['>'] = "&gt;";
@@ -132,8 +136,11 @@ static inline void escape(const OctoMark *restrict om, const char *restrict s,
       buf_push(out, s[i]);
   }
 }
-void parse_inline(const OctoMark *restrict om, const char *restrict text,
-                  size_t len, Buffer *restrict out) {
+static const char *tag_open[] = {"", "<em>", "<strong>", "<strong><em>"};
+static const char *tag_close[] = {"", "</em>", "</strong>", "</em></strong>"};
+
+static void parse_inline(const OctoMark *restrict om, const char *restrict text,
+                         size_t len, Buffer *restrict out) {
   size_t i = 0;
   while (i < len) {
     char c = text[i];
@@ -148,40 +155,25 @@ void parse_inline(const OctoMark *restrict om, const char *restrict text,
         n++;
       if (n > 3)
         n = 3;
-      if (n == 3)
-        buf_append(out, "<strong><em>");
-      else if (n == 2)
-        buf_append(out, "<strong>");
-      else
-        buf_append(out, "<em>");
-      size_t st = i + n;
-      int cl = 0;
+      buf_append(out, tag_open[n]);
+      size_t st = i + n, cl = 0;
       i += n;
       while (i < len) {
-        if (text[i] == c) {
-          cl++;
-          if (cl == n)
-            break;
-        } else
+        if (text[i] == c && ++cl == n)
+          break;
+        if (text[i] != c)
           cl = 0;
         i++;
       }
       parse_inline(om, text + st, i - st - n + 1, out);
-      if (n == 3)
-        buf_append(out, "</em></strong>");
-      else if (n == 2)
-        buf_append(out, "</strong>");
-      else
-        buf_append(out, "</em>");
+      buf_append(out, tag_close[n]);
     } else if (c == '`') {
       int cnt = 1;
-      while (i + 1 < len && text[i + 1] == '`') {
+      while (i + cnt < len && text[i + cnt] == '`')
         cnt++;
-        i++;
-      }
       buf_append(out, "<code>");
-      size_t s = i + 1;
-      while (i + 1 < len) {
+      size_t s = i + cnt;
+      while (i + cnt < len) {
         i++;
         bool m = true;
         for (int k = 0; k < cnt; k++)
@@ -199,65 +191,55 @@ void parse_inline(const OctoMark *restrict om, const char *restrict text,
       buf_append(out, "<del>");
       i += 2;
       size_t s = i;
-      while (i + 1 < len && !(text[i] == '~' && text[i + 1] == '~'))
+      while (i + 1 < len && (text[i] != '~' || text[i + 1] != '~'))
         i++;
       parse_inline(om, text + s, i - s, out);
       buf_append(out, "</del>");
       i++;
-    } else if (c == '!' && i + 1 < len && text[i + 1] == '[') {
-      i += 2;
-      size_t s = i;
-      int d = 1;
-      while (i < len && d > 0) {
-        if (text[i] == '[')
-          d++;
-        else if (text[i] == ']')
-          d--;
+    } else if (c == '!' || c == '[') {
+      size_t start_idx = i;
+      if (c == '!')
         i++;
-      }
-      if (i < len && text[i] == '(') {
-        size_t l = i - s - 1;
+      if (i < len && text[i] == '[') {
         i++;
-        size_t us = i;
-        while (i < len && text[i] != ')' && text[i] != ' ')
+        size_t s = i, d = 1;
+        while (i < len && d > 0) {
+          if (text[i] == '[')
+            d++;
+          else if (text[i] == ']')
+            d--;
           i++;
-        size_t ul = i - us;
-        while (i < len && text[i] != ')')
+        }
+        if (i < len && text[i] == '(') {
+          size_t txt_len = i - s - 1;
           i++;
-        buf_append(out, "<img src=\"");
-        buf_append_n(out, text + us, ul);
-        buf_append(out, "\" alt=\"");
-        buf_append_n(out, text + s, l);
-        buf_append(out, "\">");
+          size_t us = i;
+          while (i < len && text[i] != ')' && text[i] != ' ')
+            i++;
+          size_t ul = i - us;
+          while (i < len && text[i] != ')')
+            i++;
+          if (c == '!') {
+            buf_append(out, "<img src=\"");
+            buf_append_n(out, text + us, ul);
+            buf_append(out, "\" alt=\"");
+            buf_append_n(out, text + s, txt_len);
+            buf_append(out, "\">");
+          } else {
+            buf_append(out, "<a href=\"");
+            buf_append_n(out, text + us, ul);
+            buf_append(out, "\">");
+            parse_inline(om, text + s, txt_len, out);
+            buf_append(out, "</a>");
+          }
+          goto next;
+        }
       }
-    } else if (c == '[') {
-      i++;
-      size_t s = i;
-      int d = 1;
-      while (i < len && d > 0) {
-        if (text[i] == '[')
-          d++;
-        else if (text[i] == ']')
-          d--;
-        i++;
-      }
-      if (i < len && text[i] == '(') {
-        size_t l = i - s - 1;
-        i++;
-        size_t us = i;
-        while (i < len && text[i] != ')' && text[i] != ' ')
-          i++;
-        size_t ul = i - us;
-        while (i < len && text[i] != ')')
-          i++;
-        buf_append(out, "<a href=\"");
-        buf_append_n(out, text + us, ul);
-        buf_append(out, "\">");
-        parse_inline(om, text + s, l, out);
-        buf_append(out, "</a>");
-      }
-    } else if (c == 'h' && (strncmp(text + i, "http://", 7) == 0 ||
-                            strncmp(text + i, "https://", 8) == 0)) {
+      i = start_idx;
+      goto def;
+    } else if (c == 'h' && (strncmp(text + i, "http", 4) == 0) &&
+               (strncmp(text + i + 4, "://", 3) == 0 ||
+                strncmp(text + i + 4, "s://", 4) == 0)) {
       size_t st = i;
       while (i < len && !isspace(text[i]) && text[i] != '<' && text[i] != '>')
         i++;
@@ -275,10 +257,14 @@ void parse_inline(const OctoMark *restrict om, const char *restrict text,
         i++;
       escape(om, text + s, i - s, out);
       buf_append(out, "</span>");
-    } else if (om->esc[(unsigned char)c])
-      buf_append(out, om->esc[(unsigned char)c]);
-    else
-      buf_push(out, c);
+    } else {
+    def:
+      if (om->esc[(unsigned char)c])
+        buf_append(out, om->esc[(unsigned char)c]);
+      else
+        buf_push(out, c);
+    }
+  next:
     i++;
   }
 }
