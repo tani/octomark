@@ -47,11 +47,11 @@ pub const OctomarkParser = struct {
     options: OctomarkOptions = .{},
     table_header_storage: Buffer = .{},
     table_header_pending: bool = false,
-    gpa: std.mem.Allocator = undefined,
+    allocator: std.mem.Allocator = undefined,
 
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
-        self.* = OctomarkParser{ .gpa = allocator };
+        self.* = OctomarkParser{ .allocator = allocator };
         const special = "\\['*`&<>\"'_~!$h";
         for (special) |ch| self.is_special_char[ch] = true;
         self.html_escape_map['&'] = "&amp;";
@@ -629,7 +629,7 @@ pub const OctomarkParser = struct {
                 try parser.processParagraph(parser.table_header_storage.items, false, false, output);
             }
             parser.table_header_storage.clearRetainingCapacity();
-            try parser.table_header_storage.appendSlice(parser.gpa, line_content);
+            try parser.table_header_storage.appendSlice(parser.allocator, line_content);
             parser.table_header_pending = true;
             return true;
         }
