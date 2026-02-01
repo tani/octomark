@@ -324,11 +324,11 @@ private:
 
     size_t indent = 0;
     if (!in_code) {
-      while (line.length() >= indent * 4 + 4 &&
-             line.substr(indent * 4, 4) == "    ")
+      while (line.length() >= indent * 2 + 2 &&
+             line.substr(indent * 2, 2) == "  ")
         indent++;
     }
-    std::string_view rel = line.substr(indent * 4);
+    std::string_view rel = line.substr(indent * 2);
     uint64_t window = 0;
     size_t cp = std::min((size_t)8, rel.length());
     if (cp > 0)

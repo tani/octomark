@@ -51,8 +51,8 @@ const tests = [
         expected: '<ul>\n<li><input type="checkbox"  disabled> Todo</li>\n<li><input type="checkbox" checked disabled> Done</li>\n</ul>\n'
     },
     {
-        name: "Nested List (4 spaces)",
-        input: "- Level 1\n    - Level 2\n- Back to 1",
+        name: "Nested List (2 spaces)",
+        input: "- Level 1\n  - Level 2\n- Back to 1",
         expected: "<ul>\n<li>Level 1</li>\n<ul>\n<li>Level 2</li>\n</ul>\n<li>Back to 1</li>\n</ul>\n"
     },
     {
@@ -162,7 +162,7 @@ const lines = [];
 for (let i = 0; i < 5000; i++) {
     lines.push(`# Heading ${i}`);
     lines.push(`- List item ${i}`);
-    lines.push(`    - Nested item ${i}`);
+    lines.push(`  - Nested item ${i}`);
     lines.push(`> Quote ${i}`);
     lines.push(`| Col 1 | Col 2 |`);
     lines.push(`|---|---|`);
@@ -196,11 +196,11 @@ console.log(`\nComparison: OctoMark is ${(durationMd / duration).toFixed(2)}x fa
 console.log("\n--- Starting Deeply Nested List Benchmark ---");
 const nestedLines = [];
 for (let i = 0; i < 500; i++) {
-    nestedLines.push(" ".repeat(i * 4) + "- Nest Level " + i);
+    nestedLines.push(" ".repeat(i * 2) + "- Nest Level " + i);
 }
 // Unwind
 for (let i = 499; i >= 0; i--) {
-    nestedLines.push(" ".repeat(i * 4) + "- Nest Level " + i);
+    nestedLines.push(" ".repeat(i * 2) + "- Nest Level " + i);
 }
 const nestedInput = nestedLines.join("\n");
 

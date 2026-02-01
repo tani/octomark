@@ -63,14 +63,14 @@ class OctoMark {
                 continue;
             }
 
-            // Indentation Detection (Fixed 4 spaces)
+            // Indentation Detection (2 spaces)
             let indent = 0;
             if (!inCodeBlock) {
-                while (line.startsWith('    ', indent * 4)) {
+                while (line.startsWith('  ', indent * 2)) {
                     indent++;
                 }
             }
-            const rel = line.substring(indent * 4);
+            const rel = line.substring(indent * 2);
 
             // 8-character lookahead window for block dispatch (SIMD-ready logic)
             const window = rel.substring(0, 8).padEnd(8, ' ');

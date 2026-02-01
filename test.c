@@ -28,9 +28,10 @@ TestCase tests[] = {
     {"Task List", "- [ ] Todo\n- [x] Done",
      "<ul>\n<li><input type=\"checkbox\"  disabled> Todo</li>\n<li><input "
      "type=\"checkbox\" checked disabled> Done</li>\n</ul>\n"},
-    {"Nested List (4 spaces)", "- Level 1\n    - Level 2\n- Back to 1",
-     "<ul>\n<li>Level 1</li>\n<ul>\n<li>Level 2</li>\n</ul>\n<li>Back to "
-     "1</li>\n</ul>\n"},
+    {"Nested List (2 spaces)", "- Level 1\n  - Level 2\n- Back to 1",
+     "<ul>\n<li>Level 1<ul>\n<li>Level 2</li>\n</ul>\n</li>\n<li>Back to "
+     "1</li>\n"
+     "</ul>\n"},
     {"Table", "| Head A | Head B |\n|---|---|\n| Cell 1 | Cell 2 |",
      "<table><thead><tr><th>Head A</th><th>Head B</th></tr></thead><tbody>\n"
      "<tr><td>Cell 1</td><td>Cell 2</td></tr>\n</tbody></table>\n"},

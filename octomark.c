@@ -89,6 +89,7 @@ typedef struct {
   Align table_aligns[64];
   size_t table_cols;
   ListStack list_stack;
+  bool list_item_open[MAX_LIST_DEPTH];
   Buffer leftover;
 } OctoMark;
 
@@ -314,6 +315,10 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
 
   if (!om->in_code && empty) {
     while (om->list_stack.size > 0) {
+      if (om->list_item_open[om->list_stack.size - 1]) {
+        buf_append(out, "</li>\n");
+        om->list_item_open[om->list_stack.size - 1] = false;
+      }
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
@@ -326,14 +331,19 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
 
   size_t indent = 0;
   if (!om->in_code) {
-    while (len >= indent * 4 + 4 && strncmp(line + indent * 4, "    ", 4) == 0)
+    while (len >= indent * 2 + 2 && line[indent * 2] == ' ' &&
+           line[indent * 2 + 1] == ' ')
       indent++;
   }
-  const char *rel = line + indent * 4;
-  size_t rlen = len - indent * 4;
+  const char *rel = line + indent * 2;
+  size_t rlen = len - indent * 2;
 
   if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
     while (om->list_stack.size > 0) {
+      if (om->list_item_open[om->list_stack.size - 1]) {
+        buf_append(out, "</li>\n");
+        om->list_item_open[om->list_stack.size - 1] = false;
+      }
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
@@ -378,48 +388,70 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
     int tag_type = is_ul ? 0 : 1;
+    // A. Shallow return: Pop deeper levels and close their items
+    while (om->list_stack.size > indent + 1) {
+      if (om->list_item_open[om->list_stack.size - 1])
+        buf_append(out, "</li>\n");
+      om->list_item_open[om->list_stack.size - 1] = false;
+      int t = om->list_stack.types[--om->list_stack.size];
+      buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
+      // After popping a level, the parent <li> of that level is now the active
+      // item at the new size-1
+      if (om->list_stack.size > 0)
+        om->list_item_open[om->list_stack.size - 1] = true;
+    }
+
+    // B. Deeper indent: Push new levels
     while (om->list_stack.size < indent + 1 &&
            om->list_stack.size < MAX_LIST_DEPTH) {
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
-      om->list_stack.types[om->list_stack.size++] = tag_type;
+      om->list_stack.types[om->list_stack.size] = tag_type;
+      om->list_item_open[om->list_stack.size] = false;
+      om->list_stack.size++;
     }
-    while (om->list_stack.size > indent + 1) {
-      int t = om->list_stack.types[--om->list_stack.size];
-      buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
+
+    // C. Same level check:
+    if (om->list_item_open[indent]) {
+      // If we are moving to a new item at THIS level, close previous item
+      // first. If we just pushed to this level in Step B,
+      // om->list_item_open[indent] will be false.
+      buf_append(out, "</li>\n");
     }
-    if (om->list_stack.size > 0 &&
-        om->list_stack.types[om->list_stack.size - 1] != tag_type) {
-      int t = om->list_stack.types[--om->list_stack.size];
-      buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
+
+    if (om->list_stack.types[indent] != tag_type) {
+      buf_append(out,
+                 om->list_stack.types[indent] == 0 ? "</ul>\n" : "</ol>\n");
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
-      om->list_stack.types[om->list_stack.size++] = tag_type;
+      om->list_stack.types[indent] = tag_type;
     }
+
+    buf_append(out, "<li>");
+    om->list_item_open[indent] = true;
+
     if (is_ul) {
       const char *rest = rel + 2;
       size_t r_l = rlen - 2;
       if (r_l >= 4 && rest[0] == '[' && (rest[1] == ' ' || rest[1] == 'x') &&
           rest[2] == ']' && rest[3] == ' ') {
-        buf_append(out, "<li><input type=\"checkbox\" ");
+        buf_append(out, "<input type=\"checkbox\" ");
         if (rest[1] == 'x')
           buf_append(out, "checked ");
         else
           buf_append(out, " ");
         buf_append(out, "disabled> ");
         parse_inline(om, rest + 4, r_l - 4, out);
-        buf_append(out, "</li>\n");
       } else {
-        buf_append(out, "<li>");
         parse_inline(om, rest, r_l, out);
-        buf_append(out, "</li>\n");
       }
     } else {
-      buf_append(out, "<li>");
       parse_inline(om, rel + 3, rlen - 3, out);
-      buf_append(out, "</li>\n");
     }
     return false;
   } else if (om->list_stack.size > 0) {
     while (om->list_stack.size > 0) {
+      if (om->list_item_open[om->list_stack.size - 1])
+        buf_append(out, "</li>\n");
+      om->list_item_open[om->list_stack.size - 1] = false;
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
@@ -585,6 +617,10 @@ void octomark_finish(OctoMark *om, Buffer *out) {
     om->leftover.size = 0;
   }
   while (om->list_stack.size > 0) {
+    if (om->list_item_open[om->list_stack.size - 1]) {
+      buf_append(out, "</li>\n");
+      om->list_item_open[om->list_stack.size - 1] = false;
+    }
     int t = om->list_stack.types[--om->list_stack.size];
     buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
   }
@@ -607,31 +643,23 @@ int main() {
   OctoMark om;
   octomark_init(&om);
   Buffer output;
-  buf_init(&output, 100 * 1024 * 1024);
+  buf_init(&output, 65536);
 
-  const char *line1 = "# Title for C99 test\n";
-  const char *line2 = "- Item with **bold**, `code`, and $math$\n";
-  const char *line3 = "Regular text for streaming performance measurement.\n";
-
-  printf("--- OctoMark Turbo C99 Benchmark ---\n");
-  clock_t t1 = clock();
-  for (int i = 0; i < 1000000; i++) {
-    octomark_feed(&om, line1, strlen(line1), &output);
-    octomark_feed(&om, line2, strlen(line2), &output);
-    octomark_feed(&om, line3, strlen(line3), &output);
+  char buf[65536];
+  size_t bytes;
+  while ((bytes = fread(buf, 1, sizeof(buf), stdin)) > 0) {
+    octomark_feed(&om, buf, bytes, &output);
+    if (output.size > 0) {
+      fwrite(output.data, 1, output.size, stdout);
+      output.size = 0;
+      output.data[0] = '\0';
+    }
   }
+
   octomark_finish(&om, &output);
-  clock_t t2 = clock();
-
-  double sec = (double)(t2 - t1) / CLOCKS_PER_SEC;
-  size_t total_in = (strlen(line1) + strlen(line2) + strlen(line3)) * 1000000;
-  double gb_s = (double)total_in / (sec * 1024 * 1024 * 1024);
-
-  printf("------------------------------------------\n");
-  printf("Data Size:  %.2f MB\n", (double)total_in / (1024 * 1024));
-  printf("Time Taken: %.3f sec\n", sec);
-  printf("Throughput: %.3f GB/s\n", gb_s);
-  printf("------------------------------------------\n");
+  if (output.size > 0) {
+    fwrite(output.data, 1, output.size, stdout);
+  }
 
   buf_free(&output);
   octomark_free(&om);
