@@ -8,7 +8,11 @@
 class OctoMark {
     constructor() {
         this.escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-        this.specialRe = /[\\\[\*_`&<>"']/g;
+        this.specialChars = new Uint8Array(256);
+        const specials = "\\['*`&<>\"_";
+        for (let i = 0; i < specials.length; i++) {
+            this.specialChars[specials.charCodeAt(i)] = 1;
+        }
     }
 
     escape(str) {
@@ -155,16 +159,19 @@ class OctoMark {
         const len = text.length;
 
         while (i < len) {
-            // Optimization: Skip plain text
-            this.specialRe.lastIndex = i;
-            const match = this.specialRe.exec(text);
-            if (match && match.index > i) {
-                res += text.substring(i, match.index);
-                i = match.index;
-            } else if (!match) {
-                res += text.substring(i);
-                break;
+            const start = i;
+            // Manual Scan for special chars
+            while (i < len) {
+                const code = text.charCodeAt(i);
+                if (code < 256 && this.specialChars[code]) break;
+                i++;
             }
+            
+            if (i > start) {
+                res += text.substring(start, i);
+            }
+
+            if (i >= len) break;
 
             const char = text[i];
             
