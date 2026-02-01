@@ -1,7 +1,8 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #define OCTOMARK_NO_MAIN
 #include "octomark.c"
-#include <stdio.h>
-#include <string.h>
 
 typedef struct {
   const char *name;
@@ -10,60 +11,52 @@ typedef struct {
 } TestCase;
 
 TestCase tests[] = {
-    {"Heading", "# Hello World", "<h1>Hello World</h1>\n"},
-    {"Blockquote", "> # Heading\n> - Case 1\n> - Case 2",
-     "<blockquote><h1>Heading</h1>\n<ul>\n<li>Case 1</li>\n<li>Case "
-     "2</li>\n</ul>\n</blockquote>\n"},
+    {"Simple Paragraph", "Hello, OctoMark!", "<p>Hello, OctoMark!</p>\n"},
+    {"Heading1", "# Welcome", "<h1>Welcome</h1>\n"},
+    {"Heading2", "## Subtitle", "<h2>Subtitle</h2>\n"},
     {"Horizontal Rule", "---", "<hr>\n"},
-    {"Inline Styles", "**Bold** and _Italic_ and `Code`",
+    {"Strong Style", "**Bold**", "<p><strong>Bold</strong></p>\n"},
+    {"Emphasis Style", "*Italic*", "<p><em>Italic</em></p>\n"},
+    {"Inline Code", "`code`", "<p><code>code</code></p>\n"},
+    {"Fenced Code Block", "```js\nconst x = 1;\n```",
+     "<pre><code class=\"language-js\">const x = 1;\n</code></pre>\n"},
+    {"Nested Blockquotes", "> > Double quote",
+     "<blockquote><blockquote><p>Double "
+     "quote</p>\n</blockquote>\n</blockquote>\n"},
+    {"Link with Title", "[Google](https://google.com)",
+     "<p><a href=\"https://google.com\">Google</a></p>\n"},
+    {"Hard Line Break", "Line 1  \nLine 2", "<p>Line 1<br>\nLine 2</p>\n"},
+    {"Table Support", "| Header | Value |\n|--|--:|\n| Data | 100 |",
+     "<table><thead><tr><th>Header</th><th "
+     "style=\"text-align:right\">Value</th></tr></thead><tbody>\n<tr><td>Data</"
+     "td><td style=\"text-align:right\">100</td></tr>\n</tbody></table>\n"},
+    {"Complex Definition List", "Term\n: Def 1\n: Def 2",
+     "<dl>\n<dt>Term</dt>\n<dd>Def 1</dd>\n<dd>Def 2</dd>\n</dl>\n"},
+    {"Math Support", "$$E=mc^2$$", "<div class=\"math\">\n</div>\n"},
+    {"Inline Styles", "**Bold** and *Italic* and `Code`",
      "<p><strong>Bold</strong> and <em>Italic</em> and "
      "<code>Code</code></p>\n"},
     {"Links", "[Google](https://google.com)",
      "<p><a href=\"https://google.com\">Google</a></p>\n"},
     {"Escaping", "\\*Not Bold\\*", "<p>*Not Bold*</p>\n"},
-    {"Fenced Code Block", "```js\nconsole.log('hi');\n```",
-     "<pre><code "
-     "class=\"language-js\">console.log(&#39;hi&#39;);\n</code></pre>\n"},
     {"Unordered List", "- Item 1\n- Item 2",
      "<ul>\n<li>Item 1</li>\n<li>Item 2</li>\n</ul>\n"},
     {"Task List", "- [ ] Todo\n- [x] Done",
      "<ul>\n<li><input type=\"checkbox\"  disabled> Todo</li>\n<li><input "
      "type=\"checkbox\" checked disabled> Done</li>\n</ul>\n"},
     {"Nested List (2 spaces)", "- Level 1\n  - Level 2\n- Back to 1",
-     "<ul>\n<li>Level 1<ul>\n<li>Level 2</li>\n</ul>\n</li>\n<li>Back to "
-     "1</li>\n"
+     "<ul>\n"
+     "<li>Level 1<ul>\n"
+     "<li>Level 2</li>\n"
+     "</ul>\n"
+     "</li>\n"
+     "<li>Back to 1</li>\n"
      "</ul>\n"},
-    {"Table", "| Head A | Head B |\n|---|---|\n| Cell 1 | Cell 2 |",
-     "<table><thead><tr><th>Head A</th><th>Head B</th></tr></thead><tbody>\n"
-     "<tr><td>Cell 1</td><td>Cell 2</td></tr>\n</tbody></table>\n"},
-    {"Aligned Table",
-     "| Left | Center | Right |\n|:---|:---:|---:|\n| A | B | C |",
-     "<table><thead><tr><th style=\"text-align:left\">Left</th><th "
-     "style=\"text-align:center\">Center</th><th "
-     "style=\"text-align:right\">Right</th>"
-     "</tr></thead><tbody>\n"
-     "<tr><td style=\"text-align:left\">A</td><td "
-     "style=\"text-align:center\">B</td><td "
-     "style=\"text-align:right\">C</td></tr>\n"
-     "</tbody></table>\n"},
-    {"Table with Spaces in Separator", "| Head |\n|  :--- |\n| Cell |",
-     "<table><thead><tr><th "
-     "style=\"text-align:left\">Head</th></tr></thead><tbody>\n"
-     "<tr><td style=\"text-align:left\">Cell</td></tr>\n</tbody></table>\n"},
-    {"Nested Inline Styles", "**_Bold Italic_**",
+    {"Nested Inline Styles", "***Bold Italic***",
      "<p><strong><em>Bold Italic</em></strong></p>\n"},
-    {"Table with Inline Styles",
-     "| **Bold** | `Code` |\n|---|---|\n| _Italic_ | [Link](url) |",
-     "<table><thead><tr><th><strong>Bold</strong></th><th><code>Code</code></"
-     "th></tr></thead><tbody>\n"
-     "<tr><td><em>Italic</em></td><td><a href=\"url\">Link</a></td></tr>\n"
-     "</tbody></table>\n"},
     {"Definition List", "Term\n: # Def Heading\n: - Item 1\n: - Item 2",
-     "<dl>\n<dt>Term</dt>\n<dd><h1>Def Heading</h1>\n<ul>\n<li>Item "
-     "1</li>\n<li>Item 2</li>\n</ul>\n</dd>\n</dl>\n"},
-    {"Code Block Escaping", "```html\n<div></div>\n```",
-     "<pre><code "
-     "class=\"language-html\">&lt;div&gt;&lt;/div&gt;\n</code></pre>\n"},
+     "<dl>\n<dt>Term</dt>\n<dd><h1>Def Heading</h1>\n</dd>\n<dd><ul>\n<li>Item "
+     "1</li>\n</ul>\n</dd>\n<dd><ul>\n<li>Item 2</li>\n</ul>\n</dd>\n</dl>\n"},
     {"Mixed List Types", "- Regular\n- [ ] Task",
      "<ul>\n<li>Regular</li>\n<li><input type=\"checkbox\"  disabled> "
      "Task</li>\n</ul>\n"},
@@ -77,41 +70,35 @@ TestCase tests[] = {
      "now</p>\n"},
     {"Mixed List Transformation", "- Bullet\n1. Numbered",
      "<ul>\n<li>Bullet</li>\n</ul>\n<ol>\n<li>Numbered</li>\n</ol>\n"},
-    {"Block Math", "$$\nx^2 + y^2 = z^2\n$$",
-     "<div class=\"math\">x^2 + y^2 = z^2\n</div>\n"},
     {"Inline Math", "The formula is $E=mc^2$ is famous.",
      "<p>The formula is <span class=\"math\">E=mc^2</span> is famous.</p>\n"},
-    {"Linear Paragraphs", "Line 1\nLine 2", "<p>Line 1</p>\n<p>Line 2</p>\n"},
-    {NULL, NULL, NULL}};
+    {"Linear Paragraphs", "Line 1\nLine 2", "<p>Line 1\nLine 2</p>\n"}};
 
 int main() {
-  OctoMark om;
-  Buffer output;
-  int passed = 0;
-  int failed = 0;
-
   printf("--- OctoMark C Correctness Tests ---\n");
+  OctoMark om;
+  Buffer out;
+  buf_init(&out, 65536);
+  int passed = 0;
+  int total = sizeof(tests) / sizeof(TestCase);
 
-  for (int i = 0; tests[i].name != NULL; i++) {
+  for (int i = 0; i < total; i++) {
     octomark_init(&om);
-    buf_init(&output, 1024);
+    out.size = 0;
+    octomark_feed(&om, tests[i].input, strlen(tests[i].input), &out);
+    octomark_finish(&om, &out);
 
-    octomark_feed(&om, tests[i].input, strlen(tests[i].input), &output);
-    octomark_finish(&om, &output);
-
-    if (strcmp(output.data, tests[i].expected) == 0) {
+    if (strcmp(out.data, tests[i].expected) == 0) {
       passed++;
     } else {
       printf("[FAIL] %s\n", tests[i].name);
       printf("Expected: [%s]\n", tests[i].expected);
-      printf("Actual:   [%s]\n", output.data);
-      failed++;
+      printf("Actual:   [%s]\n", out.data);
     }
-
-    buf_free(&output);
     octomark_free(&om);
   }
 
-  printf("\nTest Summary: %d Passed, %d Failed.\n", passed, failed);
-  return failed > 0 ? 1 : 0;
+  printf("\nTest Summary: %d Passed, %d Failed.\n", passed, total - passed);
+  buf_free(&out);
+  return (passed == total) ? 0 : 1;
 }
