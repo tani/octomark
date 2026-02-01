@@ -216,43 +216,30 @@ pub const OctomarkParser = struct {
         }
     }
 
-    fn nextSpecialIndex(parser: *const OctomarkParser, text: []const u8, start: usize) usize {
-        const VecLen = 16;
-        const special_chars = [_]u8{ '\\', '[', '\'', '*', '`', '&', '<', '>', '"', '_', '~', '!', '$', 'h' };
-
-        var i = start;
-        while (i + VecLen <= text.len) : (i += VecLen) {
-            const ptr: *const [VecLen]u8 = @ptrCast(text[i..].ptr);
-            const chunk: @Vector(VecLen, u8) = ptr.*;
-            const splat0: @Vector(VecLen, u8) = @splat(special_chars[0]);
-            var mask = chunk == splat0;
-            inline for (special_chars[1..]) |ch| {
-                const splat_ch: @Vector(VecLen, u8) = @splat(ch);
-                mask = mask | (chunk == splat_ch);
-            }
-            if (@reduce(.Or, mask)) {
-                var j: usize = 0;
-                while (j < VecLen) : (j += 1) {
-                    if (mask[j]) return i + j;
-                }
-            }
-        }
-        while (i < text.len) : (i += 1) {
-            if (parser.is_special_char[text[i]]) return i;
-        }
-        return text.len;
-    }
-
     fn parseInlineContent(parser: *const OctomarkParser, text: []const u8, output: *FastWriter) ParseError!void {
         const length = text.len;
         var i: usize = 0;
         while (i < length) {
-            const next = parser.nextSpecialIndex(text, i);
-            if (next > i) {
-                try output.writeAll(text[i..next]);
-                i = next;
-                if (i >= length) break;
+            const start = i;
+            while (i + 7 < length) {
+                if (parser.is_special_char[text[i]] or
+                    parser.is_special_char[text[i + 1]] or
+                    parser.is_special_char[text[i + 2]] or
+                    parser.is_special_char[text[i + 3]] or
+                    parser.is_special_char[text[i + 4]] or
+                    parser.is_special_char[text[i + 5]] or
+                    parser.is_special_char[text[i + 6]] or
+                    parser.is_special_char[text[i + 7]])
+                {
+                    break;
+                }
+                i += 8;
             }
+
+            while (i < length and !parser.is_special_char[text[i]]) : (i += 1) {}
+
+            if (i > start) try output.writeAll(text[start..i]);
+            if (i >= length) break;
 
             if (text[i] == '<' and parser.options.enable_html) {
                 const tag_len = parseHtmlTag(text[i..]);
