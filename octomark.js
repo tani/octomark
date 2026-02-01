@@ -1,34 +1,27 @@
 /**
- * OctoMark (Final Integrated Edition)
- * - 4-space fixed indentation for infinite nested lists.
- * - 8-char window lookahead for block dispatch.
- * - True O(n) pointer-jumping inline scanner.
- * - Long language name support & backslash escaping.
+ * OctoMark (Naive & Linear Edition)
+ * - Regex-free, O(N) single-pass.
+ * - Flat implementation with inlined logic.
  */
 class OctoMark {
     constructor() {
         this.escapeMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-        this.specialChars = new Uint8Array(256);
-        const specials = "\\['*`&<>\"_";
-        for (let i = 0; i < specials.length; i++) {
-            this.specialChars[specials.charCodeAt(i)] = 1;
-        }
     }
 
     escape(str) {
         let res = "";
         let last = 0;
+
         for (let i = 0; i < str.length; i++) {
-            const char = str[i];
-            const escaped = this.escapeMap[char];
-            if (escaped) {
+            const esc = this.escapeMap[str[i]];
+            if (esc) {
                 if (i > last) res += str.substring(last, i);
-                res += escaped;
+                res += esc;
                 last = i + 1;
             }
         }
-        if (last < str.length) res += str.substring(last);
-        return res;
+
+        return last < str.length ? res + str.substring(last) : res;
     }
 
     parse(input) {
@@ -37,11 +30,11 @@ class OctoMark {
         let inTable = false;
         let tableAligns = [];
         let listStack = [];
-
         let pos = 0;
         const len = input.length;
 
         while (pos < len) {
+            // Find next line boundary
             let next = input.indexOf('\n', pos);
             if (next === -1) next = len;
             const line = input.substring(pos, next);
@@ -49,31 +42,44 @@ class OctoMark {
 
             const trimmed = line.trim();
 
-            // --- 1. Indent Detection (Fixed 4-space) ---
-            let indentLevel = 0;
+            // Handle empty lines or code block escapes
+            if (!inCodeBlock && !trimmed) {
+                while (listStack.length) {
+                    output += "</ul>\n";
+                    listStack.pop();
+                }
+                if (inTable) {
+                    output += "</tbody></table>\n";
+                    inTable = false;
+                }
+                continue;
+            }
+
+            // Indentation Detection (Fixed 4 spaces)
+            let indent = 0;
             if (!inCodeBlock) {
-                while (line.startsWith('    ', indentLevel * 4)) {
-                    indentLevel++;
+                while (line.startsWith('    ', indent * 4)) {
+                    indent++;
                 }
             }
-            const relativeLine = line.substring(indentLevel * 4);
-            const window = Array.from(relativeLine.padEnd(8, ' ')).slice(0, 8);
+            const rel = line.substring(indent * 4);
 
-            // --- 2. Fenced Code Block (```) ---
-            if (window[0] === '`' && window[1] === '`' && window[2] === '`') {
-                this.closeAllLists(listStack, () => { output += "</ul>\n"; });
-                if (inTable) { output += "</tbody></table>\n"; inTable = false; }
+            // --- Fenced Code Block ---
+            if (rel.startsWith('```')) {
+                while (listStack.length) {
+                    output += "</ul>\n";
+                    listStack.pop();
+                }
+                if (inTable) {
+                    output += "</tbody></table>\n";
+                    inTable = false;
+                }
 
                 if (!inCodeBlock) {
-                    let langPart = "";
-                    let k = 3;
-                    while (k < relativeLine.length && relativeLine[k] === ' ') k++;
-                    let start = k;
-                    while (k < relativeLine.length && relativeLine[k] !== ' ') k++;
-                    langPart = relativeLine.substring(start, k);
-
-                    const langClass = langPart ? ` class="language-${this.escape(langPart)}"` : "";
-                    output += `<pre><code${langClass}>`;
+                    const langPart = rel.substring(3).trim();
+                    const lang = langPart.split(' ')[0];
+                    const langAttr = lang ? ` class="language-${this.escape(lang)}"` : "";
+                    output += `<pre><code${langAttr}>`;
                 } else {
                     output += "</code></pre>\n";
                 }
@@ -86,100 +92,120 @@ class OctoMark {
                 continue;
             }
 
-            // --- 3. Table / List Exit Guard ---
-            if (inTable && !relativeLine.startsWith('|')) {
-                output += "</tbody></table>\n";
-                inTable = false;
-            }
-
-            // 空行の処理
-            if (trimmed === "") {
-                this.closeAllLists(listStack, () => { output += "</ul>\n"; });
-                if (inTable) { output += "</tbody></table>\n"; inTable = false; }
-                continue;
-            }
-
-            // --- 4. Nested List Logic ---
-            if (window[0] === '-' && window[1] === ' ') {
-                // 階層が増える場合
-                while (listStack.length < indentLevel + 1) {
+            // --- Unordered Lists ---
+            if (rel.startsWith('- ')) {
+                // Adjust list depth
+                while (listStack.length < indent + 1) {
                     output += "<ul>\n";
-                    listStack.push(true);
+                    listStack.push(1);
                 }
-                // 階層が減る場合
-                while (listStack.length > indentLevel + 1) {
+                while (listStack.length > indent + 1) {
                     output += "</ul>\n";
                     listStack.pop();
                 }
 
-                if (window[2] === '[' && (window[3] === ' ' || window[3] === 'x') && window[4] === ']') {
-                    const checked = window[3] === 'x' ? "checked" : "";
-                    output += `<li><input type="checkbox" ${checked} disabled> ${this.parseInline(relativeLine.substring(6))}</li>\n`;
+                const content = rel.substring(2);
+                const isTask = content.startsWith('[ ] ') || content.startsWith('[x] ');
+
+                if (isTask) {
+                    const isChecked = content[1] === 'x';
+                    const checkedAttr = isChecked ? "checked" : "";
+                    const taskContent = content.substring(4);
+                    output += `<li><input type="checkbox" ${checkedAttr} disabled> ${this.parseInline(taskContent)}</li>\n`;
                 } else {
-                    output += `<li>${this.parseInline(relativeLine.substring(2))}</li>\n`;
+                    output += `<li>${this.parseInline(content)}</li>\n`;
                 }
                 continue;
-            } else {
-                // リスト以外の要素が来たらリストを閉じる
-                this.closeAllLists(listStack, () => { output += "</ul>\n"; });
+            } else if (listStack.length) {
+                // Not a list item, close all open lists
+                while (listStack.length) {
+                    output += "</ul>\n";
+                    listStack.pop();
+                }
             }
 
-            // --- 5. Other Block Elements ---
-            if (window[0] === '#' && window[1] === ' ') {
-                output += `<h1>${this.parseInline(relativeLine.substring(2))}</h1>\n`;
-                continue;
-            }
-            if (window[0] === '>' && window[1] === ' ') {
-                output += `<blockquote>${this.parseInline(relativeLine.substring(2))}</blockquote>\n`;
-                continue;
-            }
-            if (window[0] === '-' && window[1] === '-' && window[2] === '-' && trimmed === '---') {
+            // --- Block Elements ---
+            if (rel.startsWith('# ')) {
+                const headingText = rel.substring(2);
+                output += `<h1>${this.parseInline(headingText)}</h1>\n`;
+            } else if (rel.startsWith('> ')) {
+                const quoteText = rel.substring(2);
+                output += `<blockquote>${this.parseInline(quoteText)}</blockquote>\n`;
+            } else if (rel === '---') {
                 output += "<hr>\n";
-                continue;
-            }
+            } else if (rel[0] === '|') {
+                // Common cell splitting logic
+                const splitRow = (l) => {
+                    let s = l.trim();
+                    if (s[0] === '|') s = s.substring(1);
+                    if (s[s.length - 1] === '|') s = s.substring(0, s.length - 1);
+                    return s.split('|').map(c => c.trim());
+                };
 
-            // --- 6. Tables ---
-            if (window[0] === '|') {
-                // Lookahead check for separator line
-                let nextSepPos = input.indexOf('\n', next + 1);
-                if (nextSepPos === -1) nextSepPos = len;
-                const nextLine = input.substring(next + 1, nextSepPos).trim();
+                if (!inTable) {
+                    // Peek ahead for separator line
+                    let nextLineEnd = input.indexOf('\n', next + 1);
+                    const lookaheadLine = input.substring(next + 1, nextLineEnd === -1 ? len : nextLineEnd).trim();
 
-                if (!inTable && nextLine[0] === '|' && (nextLine[1] === '-' || nextLine[1] === ':')) {
-                    output += "<table><thead><tr>";
-                    const cells = this.splitCells(relativeLine);
-                    tableAligns = this.parseAligns(nextLine);
-                    cells.forEach((c, idx) => {
-                        const style = tableAligns[idx] ? ` style="text-align:${tableAligns[idx]}"` : "";
-                        output += `<th${style}>${this.parseInline(c)}</th>`;
-                    });
-                    output += "</tr></thead><tbody>\n";
-                    inTable = true;
-                    pos = nextSepPos + 1; // Skip the separator line
-                    continue;
-                } else if (inTable) {
-                    output += "<tr>";
-                    this.splitCells(relativeLine).forEach((c, idx) => {
-                        const style = tableAligns[idx] ? ` style="text-align:${tableAligns[idx]}"` : "";
-                        output += `<td${style}>${this.parseInline(c)}</td>`;
-                    });
-                    output += "</tr>\n";
-                    continue;
+                    if (lookaheadLine[0] === '|' && (lookaheadLine[1] === '-' || lookaheadLine[1] === ':')) {
+                        // New Table detected
+                        const headerCells = splitRow(rel);
+                        const sepCells = splitRow(lookaheadLine);
+
+                        // Parse alignments
+                        tableAligns = sepCells.map(c => {
+                            const hasLeft = c.startsWith(':');
+                            const hasRight = c.endsWith(':');
+                            if (hasLeft && hasRight) return 'center';
+                            if (hasRight) return 'right';
+                            if (hasLeft) return 'left';
+                            return '';
+                        });
+
+                        // Build Table Header
+                        let headHtml = "<table><thead><tr>";
+                        for (let i = 0; i < headerCells.length; i++) {
+                            const align = tableAligns[i];
+                            const style = align ? ` style="text-align:${align}"` : "";
+                            headHtml += `<th${style}>${this.parseInline(headerCells[i])}</th>`;
+                        }
+                        output += headHtml + "</tr></thead><tbody>\n";
+
+                        inTable = true;
+                        pos = (nextLineEnd === -1 ? len : nextLineEnd) + 1;
+                        continue;
+                    }
                 }
+
+                // Table Body Row
+                const rowCells = splitRow(rel);
+                let rowHtml = "<tr>";
+                for (let i = 0; i < rowCells.length; i++) {
+                    const align = tableAligns[i];
+                    const style = align ? ` style="text-align:${align}"` : "";
+                    rowHtml += `<td${style}>${this.parseInline(rowCells[i])}</td>`;
+                }
+                output += rowHtml + "</tr>\n";
+            } else {
+                // Exit table if current line is not a table row
+                if (inTable) {
+                    output += "</tbody></table>\n";
+                    inTable = false;
+                }
+                output += `<p>${this.parseInline(trimmed)}</p>\n`;
             }
-
-            output += `<p>${this.parseInline(trimmed)}</p>\n`;
         }
-        this.closeAllLists(listStack, () => { output += "</ul>\n"; });
-        if (inTable) output += "</tbody></table>\n";
+
+        // Cleanup
+        while (listStack.length) {
+            output += "</ul>\n";
+            listStack.pop();
+        }
+        if (inTable) {
+            output += "</tbody></table>\n";
+        }
+
         return output;
-    }
-
-    closeAllLists(stack, callback) {
-        while (stack.length > 0) {
-            callback();
-            stack.pop();
-        }
     }
 
     parseInline(text) {
@@ -188,11 +214,14 @@ class OctoMark {
         const len = text.length;
 
         while (i < len) {
-            const start = i;
-            // Manual Scan for special chars
+            let start = i;
+
+            // Fast Scan for Special Characters
             while (i < len) {
-                const code = text.charCodeAt(i);
-                if (code < 256 && this.specialChars[code]) break;
+                const c = text[i];
+                if (c === '\\' || c === '[' || c === '*' || c === '`' ||
+                    c === '&' || c === '<' || c === '>' || c === '"' ||
+                    c === "'" || c === "_") break;
                 i++;
             }
 
@@ -204,109 +233,70 @@ class OctoMark {
 
             const char = text[i];
 
+            // --- Escaping ---
             if (char === '\\' && i + 1 < len) {
-                const next = text[i + 1];
-                res += this.escapeMap[next] || next;
-                i += 2; continue;
+                const escaped = text[i + 1];
+                res += this.escapeMap[escaped] || escaped;
+                i += 2;
+                continue;
             }
+
+            // --- Links [text](url) ---
             if (char === '[') {
-                let j = i + 1;
-                let linkText = "";
-                let foundBracket = false;
-                while (j < len) {
-                    if (text[j] === ']') { foundBracket = true; break; }
-                    linkText += text[j]; j++;
-                }
-                if (foundBracket && text[j + 1] === '(') {
-                    let k = j + 2;
-                    let url = "";
-                    let foundParen = false;
-                    let hasSpace = false;
-                    while (k < len) {
-                        if (text[k] === ')') { foundParen = true; break; }
-                        if (text[k] === ' ' || text[k] === '\t') { hasSpace = true; break; }
-                        url += text[k]; k++;
+                let closeBracket = text.indexOf(']', i + 1);
+                if (closeBracket !== -1 && text[closeBracket + 1] === '(') {
+                    let closeParen = text.indexOf(')', closeBracket + 2);
+                    if (closeParen !== -1) {
+                        const url = text.substring(closeBracket + 2, closeParen);
+                        // Ensure URL has no spaces
+                        if (url.indexOf(' ') === -1 && url.indexOf('\t') === -1) {
+                            const linkText = text.substring(i + 1, closeBracket);
+                            res += `<a href="${this.escape(url)}">${this.parseInline(linkText)}</a>`;
+                            i = closeParen + 1;
+                            continue;
+                        }
                     }
-                    if (foundParen && !hasSpace) {
-                        res += `<a href="${this.escape(url)}">${this.parseInline(linkText)}</a>`;
-                        i = k + 1; continue;
-                    }
-                }
-            }
-            if (char === '*' && text[i + 1] === '*') {
-                let j = i + 2;
-                let found = false;
-                while (j < len - 1) {
-                    if (text[j] === '*' && text[j + 1] === '*') { found = true; break; }
-                    j++;
-                }
-                if (found) {
-                    res += `<strong>${this.parseInline(text.substring(i + 2, j))}</strong>`;
-                    i = j + 2; continue;
-                }
-            }
-            if (char === '_') {
-                let j = i + 1;
-                let found = false;
-                while (j < len) {
-                    if (text[j] === '_') { found = true; break; }
-                    j++;
-                }
-                if (found) {
-                    res += `<em>${this.parseInline(text.substring(i + 1, j))}</em>`;
-                    i = j + 1; continue;
-                }
-            }
-            if (char === '`') {
-                let j = i + 1;
-                let found = false;
-                while (j < len) {
-                    if (text[j] === '`') { found = true; break; }
-                    j++;
-                }
-                if (found) {
-                    res += `<code>${this.escape(text.substring(i + 1, j))}</code>`;
-                    i = j + 1; continue;
                 }
             }
 
+            // --- Bold **text** ---
+            if (char === '*' && text[i + 1] === '*') {
+                let closeBold = text.indexOf('**', i + 2);
+                if (closeBold !== -1) {
+                    const boldText = text.substring(i + 2, closeBold);
+                    res += `<strong>${this.parseInline(boldText)}</strong>`;
+                    i = closeBold + 2;
+                    continue;
+                }
+            }
+
+            // --- Italic _text_ ---
+            if (char === '_') {
+                let closeItalic = text.indexOf('_', i + 1);
+                if (closeItalic !== -1) {
+                    const italicText = text.substring(i + 1, closeItalic);
+                    res += `<em>${this.parseInline(italicText)}</em>`;
+                    i = closeItalic + 1;
+                    continue;
+                }
+            }
+
+            // --- Inline Code `text` ---
+            if (char === '`') {
+                let closeCode = text.indexOf('`', i + 1);
+                if (closeCode !== -1) {
+                    const codeText = text.substring(i + 1, closeCode);
+                    res += `<code>${this.escape(codeText)}</code>`;
+                    i = closeCode + 1;
+                    continue;
+                }
+            }
+
+            // Default: Escape special char if it's in escapeMap, or just add it
             res += this.escapeMap[char] || char;
             i++;
         }
         return res;
-    }
-
-    splitCells(line) {
-        let start = 0;
-        let end = line.length;
-        while (start < end && (line[start] === ' ' || line[start] === '\t')) start++;
-        if (start < end && line[start] === '|') start++;
-        while (end > start && (line[end - 1] === ' ' || line[end - 1] === '\t' || line[end - 1] === '\r')) end--;
-        if (end > start && line[end - 1] === '|') end--;
-
-        const res = [];
-        let cur = start;
-        for (let i = start; i < end; i++) {
-            if (line[i] === '|') {
-                res.push(line.substring(cur, i).trim());
-                cur = i + 1;
-            }
-        }
-        res.push(line.substring(cur, end).trim());
-        return res;
-    }
-
-    parseAligns(line) {
-        const cells = this.splitCells(line);
-        const aligns = [];
-        for (let i = 0; i < cells.length; i++) {
-            const c = cells[i];
-            if (c.startsWith(':') && c.endsWith(':')) aligns.push('center');
-            else if (c.endsWith(':')) aligns.push('right');
-            else if (c.startsWith(':')) aligns.push('left');
-            else aligns.push('');
-        }
-        return aligns;
     }
 }
 
