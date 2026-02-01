@@ -16,7 +16,7 @@ TestCase tests[] = {
     {"Heading2", "## Subtitle", "<h2>Subtitle</h2>\n"},
     {"Horizontal Rule", "---", "<hr>\n"},
     {"Strong Style", "**Bold**", "<p><strong>Bold</strong></p>\n"},
-    {"Emphasis Style", "*Italic*", "<p><em>Italic</em></p>\n"},
+    {"Emphasis Style", "_Italic_", "<p><em>Italic</em></p>\n"},
     {"Inline Code", "`code`", "<p><code>code</code></p>\n"},
     {"Fenced Code Block", "```js\nconst x = 1;\n```",
      "<pre><code class=\"language-js\">const x = 1;\n</code></pre>\n"},
@@ -33,7 +33,7 @@ TestCase tests[] = {
     {"Complex Definition List", "Term\n: Def 1\n: Def 2",
      "<dl>\n<dt>Term</dt>\n<dd>Def 1</dd>\n<dd>Def 2</dd>\n</dl>\n"},
     {"Math Support", "$$E=mc^2$$", "<div class=\"math\">\n</div>\n"},
-    {"Inline Styles", "**Bold** and *Italic* and `Code`",
+    {"Inline Styles", "**Bold** and _Italic_ and `Code`",
      "<p><strong>Bold</strong> and <em>Italic</em> and "
      "<code>Code</code></p>\n"},
     {"Links", "[Google](https://google.com)",
@@ -52,8 +52,8 @@ TestCase tests[] = {
      "</li>\n"
      "<li>Back to 1</li>\n"
      "</ul>\n"},
-    {"Nested Inline Styles", "***Bold Italic***",
-     "<p><strong><em>Bold Italic</em></strong></p>\n"},
+    {"Nested Inline Styles", "**Bold _Italic_**",
+     "<p><strong>Bold <em>Italic</em></strong></p>\n"},
     {"Definition List", "Term\n: # Def Heading\n: - Item 1\n: - Item 2",
      "<dl>\n<dt>Term</dt>\n<dd><h1>Def Heading</h1>\n</dd>\n<dd><ul>\n<li>Item "
      "1</li>\n</ul>\n</dd>\n<dd><ul>\n<li>Item 2</li>\n</ul>\n</dd>\n</dl>\n"},

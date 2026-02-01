@@ -311,25 +311,37 @@ static void parse_inline_content(const OctomarkParser *restrict parser,
         string_buffer_append_char(output, text[++i]);
       else
         string_buffer_append_string(output, "<br>");
-    } else if ((c == '*' || c == '_') && i + 1 < length) {
-      int count = 1;
-      while (i + count < length && text[i + count] == c)
-        count++;
-      if (count > 3)
-        count = 3;
-      string_buffer_append_string(output, tag_open[count]);
-      size_t content_start = i + count, close_count = 0;
-      i += count;
-      while (i < length) {
-        if (text[i] == c && ++close_count == count)
-          break;
-        if (text[i] != c)
-          close_count = 0;
-        i++;
+    } else if (c == '_') {
+      size_t content_start = i + 1;
+      size_t j = content_start;
+      while (j < length && text[j] != '_')
+        j++;
+      if (j < length) {
+        string_buffer_append_string(output, "<em>");
+        parse_inline_content(parser, text + content_start, j - content_start,
+                             output);
+        string_buffer_append_string(output, "</em>");
+        i = j;
+      } else {
+        goto default_char;
       }
-      parse_inline_content(parser, text + content_start,
-                           i - content_start - count + 1, output);
-      string_buffer_append_string(output, tag_close[count]);
+    } else if (c == '*' && i + 1 < length && text[i + 1] == '*') {
+      size_t content_start = i + 2;
+      size_t j = content_start;
+      while (j + 1 < length) {
+        if (text[j] == '*' && text[j + 1] == '*')
+          break;
+        j++;
+      }
+      if (j + 1 < length) {
+        string_buffer_append_string(output, "<strong>");
+        parse_inline_content(parser, text + content_start, j - content_start,
+                             output);
+        string_buffer_append_string(output, "</strong>");
+        i = j + 1;
+      } else {
+        goto default_char;
+      }
     } else if (c == '`') {
       int backtick_count = 1;
       while (i + backtick_count < length && text[i + backtick_count] == '`')

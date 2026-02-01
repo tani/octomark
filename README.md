@@ -29,17 +29,17 @@ make benchmark
 
 Recent run (EXAMPLE.md on this machine):
 
-- 10 MB: 24.63 ms (0.40 GB/s)
-- 50 MB: 96.16 ms (0.51 GB/s)
-- 100 MB: 190.23 ms (0.51 GB/s)
-- 200 MB: 386.32 ms (0.51 GB/s)
+- 10 MB: 18.77 ms (0.52 GB/s)
+- 50 MB: 93.41 ms (0.52 GB/s)
+- 100 MB: 185.88 ms (0.53 GB/s)
+- 200 MB: 381.44 ms (0.51 GB/s)
 
 ## Syntax Support
 
 OctoMark supports GFM-like Markdown with extensions:
 
 - **Block Elements**: Headers, Lists (Ordered/Unordered), Blockquotes, Fenced Code Blocks, Tables, Horizontal Rules, Task Lists, Definition Lists.
-- **Inline Elements**: Bold, Italic, Strikethrough, Inline Code, Links, Images, Autolinks, Hard Line Breaks.
+- **Inline Elements**: Bold (`**strong**`), Italic (`_em_`), Strikethrough, Inline Code, Links, Images, Autolinks, Hard Line Breaks (two trailing spaces).
 - **Extensions**: Math support (Block `$$` and Inline `$`).
 
 ## Getting Started

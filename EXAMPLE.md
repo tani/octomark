@@ -16,7 +16,7 @@ mixed and nested constructs.
 
 ## Inline Formatting
 
-Plain text with *italic*, **bold**, ***bold+italic***, and ~~strikethrough~~.
+Plain text with _italic_, **bold**, and ~~strikethrough~~.
 Inline code uses backticks like `printf("hello");`.
 Escaped characters: \\ \* \_ \` \[ \] \! \~.
 
@@ -65,7 +65,7 @@ Task list:
 ## Mixed and Nested Syntax
 
 - A list item that contains a blockquote:
-  > Quoted line with *italic* and `code`.
+> Quoted line with _italic_ and `code`.
   >
   > 1. Quoted ordered item
   > 2. Quoted ordered item with **bold**
@@ -75,7 +75,7 @@ Task list:
     printf("i=%d\n", i);
   }
   ```
-- A list item with inline math $x = y + 1$ and ~~strike~~.
+- A list item with inline math $x = y + 1$ and ~~strike~~ and _emphasis_.
 
 ## Fenced Code Blocks
 
