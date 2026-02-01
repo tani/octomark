@@ -24,8 +24,8 @@ On an M-series Mac / modern x86_64, OctoMark C99 implementation shows:
 
 OctoMark supports GFM-like Markdown with extensions:
 
-- **Block Elements**: Headers, Lists (Ordered/Unordered), Blockquotes, Fenced Code Blocks, Tables, Horizontal Rules, Task Lists.
-- **Inline Elements**: Bold, Italic, Strikethrough, Inline Code, Links, Images, Autolinks.
+- **Block Elements**: Headers, Lists (Ordered/Unordered), Blockquotes, Fenced Code Blocks, Tables, Horizontal Rules, Task Lists, Definition Lists.
+- **Inline Elements**: Bold, Italic, Strikethrough, Inline Code, Links, Images, Autolinks, Hard Line Breaks.
 - **Extensions**: Math support (Block `$$` and Inline `$`).
 
 ## Getting Started
