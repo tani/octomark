@@ -58,9 +58,9 @@ TestCase tests[] = {
      "th></tr></thead><tbody>\n"
      "<tr><td><em>Italic</em></td><td><a href=\"url\">Link</a></td></tr>\n"
      "</tbody></table>\n"},
-    {"Definition List", "Term\n: Definition 1\n: Definition 2",
-     "<dl>\n<dt>Term</dt>\n<dd>Definition 1</dd>\n<dd>Definition "
-     "2</dd>\n</dl>\n"},
+    {"Definition List", "Term\n: # Def Heading\n: - Item 1\n: - Item 2",
+     "<dl>\n<dt>Term</dt>\n<dd><h1>Def Heading</h1>\n<ul>\n<li>Item "
+     "1</li>\n<li>Item 2</li>\n</ul>\n</dd>\n</dl>\n"},
     {"Code Block Escaping", "```html\n<div></div>\n```",
      "<pre><code "
      "class=\"language-html\">&lt;div&gt;&lt;/div&gt;\n</code></pre>\n"},

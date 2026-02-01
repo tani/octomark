@@ -69,7 +69,8 @@ typedef enum { ALIGN_NONE, ALIGN_LEFT, ALIGN_CENTER, ALIGN_RIGHT } Align;
 #define B_QUOTE 8
 #define B_MATH 16
 #define B_CODE 32
-#define B_INTERRUPT (B_LIST | B_TABLE | B_DL | B_QUOTE)
+#define B_DD 64
+#define B_INTERRUPT (B_LIST | B_TABLE | B_DL | B_QUOTE | B_DD)
 #define B_ALL (B_INTERRUPT | B_MATH | B_CODE)
 
 // --- OctoMark State ---
@@ -81,6 +82,7 @@ typedef struct {
   bool in_table;
   bool in_dl;
   bool in_quote;
+  bool in_dd;
   Align table_aligns[64];
   size_t table_cols;
   ListStack list_stack;
@@ -120,10 +122,6 @@ static void close_blocks(OctoMark *om, Buffer *out, int mask) {
     buf_append(out, "</tbody></table>\n");
     om->in_table = false;
   }
-  if ((mask & B_DL) && om->in_dl) {
-    buf_append(out, "</dl>\n");
-    om->in_dl = false;
-  }
   if ((mask & B_LIST) && om->list_stack.size > 0) {
     while (om->list_stack.size > 0) {
       if (om->list_item_open[om->list_stack.size - 1]) {
@@ -133,6 +131,14 @@ static void close_blocks(OctoMark *om, Buffer *out, int mask) {
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
+  }
+  if ((mask & B_DD) && om->in_dd) {
+    buf_append(out, "</dd>\n");
+    om->in_dd = false;
+  }
+  if ((mask & B_DL) && om->in_dl) {
+    buf_append(out, "</dl>\n");
+    om->in_dl = false;
   }
   if ((mask & B_QUOTE) && om->in_quote) {
     buf_append(out, "</blockquote>\n");
@@ -408,8 +414,6 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   size_t rlen = len - leading_spaces;
 
   bool has_quote = (rlen > 0 && rel[0] == '>');
-  size_t indent = leading_spaces / 2;
-
   if (has_quote) {
     if (!om->in_quote) {
       close_blocks(om, out, B_INTERRUPT);
@@ -425,20 +429,62 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     size_t inner_spaces = 0;
     while (inner_spaces < rlen && rel[inner_spaces] == ' ')
       inner_spaces++;
-    indent = inner_spaces / 2;
     rel += inner_spaces;
     rlen -= inner_spaces;
+    leading_spaces = inner_spaces;
   } else if (om->in_quote) {
     close_blocks(om, out, (B_ALL & ~B_CODE) & ~B_MATH);
   }
 
+  bool has_dd = (rlen > 0 && rel[0] == ':');
+  if (has_dd) {
+    bool next_is_block = false;
+    const char *p = rel + 1;
+    size_t pl = rlen - 1;
+    while (pl > 0 && *p == ' ') {
+      p++;
+      pl--;
+    }
+    if (pl >= 2 && p[0] == '-' && p[1] == ' ')
+      next_is_block = true;
+    else if (pl >= 3 && isdigit(p[0]) && p[1] == '.' && p[2] == ' ')
+      next_is_block = true;
+    else if (pl >= 2 && p[0] == '#' && p[1] == ' ')
+      next_is_block = true;
+
+    if (om->in_dd && !next_is_block)
+      close_blocks(om, out, B_DD);
+    if (!om->in_dl) {
+      close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+      buf_append(out, "<dl>\n");
+      om->in_dl = true;
+    }
+    if (!om->in_dd) {
+      buf_append(out, "<dd>");
+      om->in_dd = true;
+    }
+    rel++;
+    rlen--;
+    if (rlen > 0 && rel[0] == ' ') {
+      rel++;
+      rlen--;
+    }
+    size_t inner_spaces = 0;
+    while (inner_spaces < rlen && rel[inner_spaces] == ' ')
+      inner_spaces++;
+    rel += inner_spaces;
+    rlen -= inner_spaces;
+    leading_spaces = inner_spaces;
+  }
+
+  size_t indent = leading_spaces / 2;
   if (rlen == 0) {
-    close_blocks(om, out, B_LIST | B_TABLE | B_DL);
+    close_blocks(om, out, B_LIST | B_TABLE | B_DL | B_DD);
     return false;
   }
 
   if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
-    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE & ~B_DL & ~B_DD));
     buf_append(out, "<pre><code");
     size_t lang_len = 0;
     while (3 + lang_len < rlen && !isspace(rel[3 + lang_len]))
@@ -454,7 +500,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
-    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE & ~B_DL & ~B_DD));
     buf_append(out, "<div class=\"math\">");
     om->in_math = true;
     return false;
@@ -463,7 +509,9 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   bool is_ul = (rlen >= 2 && rel[0] == '-' && rel[1] == ' ');
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
-    close_blocks(om, out, (B_TABLE | B_DL) & ~B_QUOTE);
+    close_blocks(om, out,
+                 (B_TABLE | B_DL) & ~B_QUOTE & ~B_DD & ~(om->in_dd ? B_DD : 0) &
+                     ~(om->in_dl ? B_DL : 0));
     int tag_type = is_ul ? 0 : 1;
     while (om->list_stack.size > indent + 1) {
       if (om->list_item_open[om->list_stack.size - 1])
@@ -513,7 +561,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '#' && rel[1] == ' ') {
-    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL & ~B_DD);
     buf_append(out, "<h1>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</h1>\n");
@@ -521,7 +569,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen == 3 && strncmp(rel, "---", 3) == 0) {
-    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
+    close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL & ~B_DD);
     buf_append(out, "<hr>\n");
     return false;
   }
@@ -534,10 +582,11 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
         const char *la = next_line;
         size_t la_l = next_newline - la;
         size_t ls = 0;
-        while (ls < la_l && isspace(la[ls]))
+        while (ls < la_l && la[ls] == ' ')
           ls++;
         if (ls < la_l && la[ls] == '|') {
-          close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_TABLE);
+          close_blocks(om, out,
+                       ((B_INTERRUPT & ~B_QUOTE) & ~B_DL & ~B_DD) & ~B_TABLE);
           buf_append(out, "<table><thead><tr>");
           om->table_cols = 0;
           const char *p = la;
@@ -614,49 +663,35 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     }
   }
 
-  if (rlen > 0 && rel[0] == ':') {
+  const char *next_l = full + next_pos;
+  const char *next_nl = strchr(next_l, '\n');
+  bool next_is_dd = false;
+  if (next_nl) {
+    const char *p = next_l;
+    while (p < next_nl && isspace(*p))
+      p++;
+    if (p < next_nl && *p == ':')
+      next_is_dd = true;
+  }
+
+  if (next_is_dd) {
+    close_blocks(om, out, (B_INTERRUPT & ~B_DL & ~B_QUOTE & ~B_DD));
     if (!om->in_dl) {
-      close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL);
       buf_append(out, "<dl>\n");
       om->in_dl = true;
     }
-    buf_append(out, "<dd>");
-    const char *d_start = rel + 1;
-    size_t d_len = rlen - 1;
-    if (d_len > 0 && d_start[0] == ' ') {
-      d_start++;
-      d_len--;
-    }
-    parse_inline(om, d_start, d_len, out);
-    buf_append(out, "</dd>\n");
-    return false;
-  } else {
-    const char *next_line = full + next_pos;
-    const char *next_newline = strchr(next_line, '\n');
-    bool next_is_def = false;
-    if (next_newline) {
-      const char *p = next_line;
-      while (p < next_newline && isspace(*p))
-        p++;
-      if (p < next_newline && *p == ':')
-        next_is_def = true;
-    }
-    if (next_is_def) {
-      if (!om->in_dl) {
-        close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL);
-        buf_append(out, "<dl>\n");
-        om->in_dl = true;
-      }
-      buf_append(out, "<dt>");
-      parse_inline(om, rel, rlen, out);
-      buf_append(out, "</dt>\n");
-      return false;
-    }
-    close_blocks(om, out, B_INTERRUPT & ~B_QUOTE);
-    buf_append(out, "<p>");
+    buf_append(out, "<dt>");
     parse_inline(om, rel, rlen, out);
-    buf_append(out, "</p>\n");
+    buf_append(out, "</dt>\n");
+    return false;
   }
+
+  if (!has_dd)
+    close_blocks(om, out, (B_INTERRUPT & ~B_QUOTE) & ~B_DL & ~B_DD);
+
+  buf_append(out, "<p>");
+  parse_inline(om, rel, rlen, out);
+  buf_append(out, "</p>\n");
   return false;
 }
 
