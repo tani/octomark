@@ -149,16 +149,26 @@ class OctoMark {
                 };
 
                 if (!inTable) {
-                    // Peek ahead for separator line
+                    // Peek ahead for separator line to confirm this is a table
                     let nextLineEnd = input.indexOf('\n', next + 1);
                     const lookaheadLine = input.substring(next + 1, nextLineEnd === -1 ? len : nextLineEnd).trim();
 
-                    if (lookaheadLine[0] === '|' && (lookaheadLine[1] === '-' || lookaheadLine[1] === ':')) {
-                        // New Table detected
+                    // Find first non-space char after the leading pipe
+                    let firstCharAfterPipe = "";
+                    if (lookaheadLine[0] === '|') {
+                        for (let k = 1; k < lookaheadLine.length; k++) {
+                            if (lookaheadLine[k] !== ' ' && lookaheadLine[k] !== '\t') {
+                                firstCharAfterPipe = lookaheadLine[k];
+                                break;
+                            }
+                        }
+                    }
+
+                    if (firstCharAfterPipe === '-' || firstCharAfterPipe === ':') {
+                        // Confirmed: This is a table header
                         const headerCells = splitRow(rel);
                         const sepCells = splitRow(lookaheadLine);
 
-                        // Parse alignments
                         tableAligns = sepCells.map(c => {
                             const hasLeft = c.startsWith(':');
                             const hasRight = c.endsWith(':');
@@ -168,11 +178,9 @@ class OctoMark {
                             return '';
                         });
 
-                        // Build Table Header
                         let headHtml = "<table><thead><tr>";
                         for (let i = 0; i < headerCells.length; i++) {
-                            const align = tableAligns[i];
-                            const style = align ? ` style="text-align:${align}"` : "";
+                            const style = tableAligns[i] ? ` style="text-align:${tableAligns[i]}"` : "";
                             headHtml += `<th${style}>${this.parseInline(headerCells[i])}</th>`;
                         }
                         output += headHtml + "</tr></thead><tbody>\n";
@@ -180,10 +188,14 @@ class OctoMark {
                         inTable = true;
                         pos = (nextLineEnd === -1 ? len : nextLineEnd) + 1;
                         continue;
+                    } else {
+                        // Not a table, just a leading pipe paragraph
+                        output += `<p>${this.parseInline(trimmed)}</p>\n`;
+                        continue;
                     }
                 }
 
-                // Table Body Row
+                // Table Body Row (only if inTable is true)
                 const rowCells = splitRow(rel);
                 let rowHtml = "<tr>";
                 for (let i = 0; i < rowCells.length; i++) {

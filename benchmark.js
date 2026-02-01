@@ -66,6 +66,11 @@ const tests = [
         expected: '<table><thead><tr><th style="text-align:left">Left</th><th style="text-align:center">Center</th><th style="text-align:right">Right</th></tr></thead><tbody>\n<tr><td style="text-align:left">A</td><td style="text-align:center">B</td><td style="text-align:right">C</td></tr>\n</tbody></table>\n'
     },
     {
+        name: "Table with Spaces in Separator",
+        input: "| Head |\n|  :--- |\n| Cell |",
+        expected: '<table><thead><tr><th style="text-align:left">Head</th></tr></thead><tbody>\n<tr><td style="text-align:left">Cell</td></tr>\n</tbody></table>\n'
+    },
+    {
         name: "Nested Inline Styles",
         input: "**_Bold Italic_**",
         expected: "<p><strong><em>Bold Italic</em></strong></p>\n"
