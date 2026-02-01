@@ -1,6 +1,3 @@
-#ifndef OCTOMARK_C
-#define OCTOMARK_C
-
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -9,63 +6,49 @@
 #include <string.h>
 #include <time.h>
 
-/**
- * OctoMark Native C99 (Turbo Edition)
- * - Restrict pointers for better vectorization.
- * - Stack-based metadata (no malloc for lists/tables).
- * - Advanced SWAR bit-masking for plain text scanning.
- */
-
-// --- Dynamic Buffer Implementation ---
+// --- Buffer Utility ---
 typedef struct {
   char *data;
   size_t size;
   size_t capacity;
 } Buffer;
 
-void buf_init(Buffer *b, size_t initial_cap) {
-  b->data = (char *)malloc(initial_cap);
+void buf_init(Buffer *b, size_t cap) {
+  b->data = (char *)malloc(cap);
+  b->data[0] = '\0';
   b->size = 0;
-  b->capacity = initial_cap;
-  if (b->data)
-    b->data[0] = '\0';
+  b->capacity = cap;
 }
 
-static inline void buf_grow(Buffer *restrict b, size_t needed) {
-  if (b->size + needed + 1 > b->capacity) {
-    size_t new_cap = b->capacity * 2;
-    if (new_cap < b->size + needed + 1)
-      new_cap = b->size + needed + 1024;
-    b->data = (char *)realloc(b->data, new_cap);
-    b->capacity = new_cap;
-  }
-}
-
-static inline void buf_append_n(Buffer *restrict b, const char *restrict s,
-                                size_t n) {
-  if (!s || n == 0)
+void buf_grow(Buffer *b, size_t min_cap) {
+  if (b->capacity >= min_cap)
     return;
-  buf_grow(b, n);
+  size_t new_cap = b->capacity * 2;
+  if (new_cap < min_cap)
+    new_cap = min_cap;
+  b->data = (char *)realloc(b->data, new_cap);
+  b->capacity = new_cap;
+}
+
+void buf_push(Buffer *b, char c) {
+  if (b->size + 2 > b->capacity)
+    buf_grow(b, b->size + 2);
+  b->data[b->size++] = c;
+  b->data[b->size] = '\0';
+}
+
+void buf_append_n(Buffer *b, const char *s, size_t n) {
+  if (b->size + n + 1 > b->capacity)
+    buf_grow(b, b->size + n + 1);
   memcpy(b->data + b->size, s, n);
   b->size += n;
   b->data[b->size] = '\0';
 }
 
-static inline void buf_append(Buffer *restrict b, const char *restrict s) {
-  if (!s)
-    return;
-  buf_append_n(b, s, strlen(s));
-}
-
-static inline void buf_push(Buffer *restrict b, char c) {
-  buf_grow(b, 1);
-  b->data[b->size++] = c;
-  b->data[b->size] = '\0';
-}
+void buf_append(Buffer *b, const char *s) { buf_append_n(b, s, strlen(s)); }
 
 void buf_free(Buffer *b) {
-  if (b->data)
-    free(b->data);
+  free(b->data);
   b->data = NULL;
   b->size = b->capacity = 0;
 }
@@ -96,19 +79,33 @@ typedef struct {
 
 void octomark_init(OctoMark *om) {
   memset(om, 0, sizeof(OctoMark));
-  const char *specs = "\\['*`&<>\"_~!$";
+  const char *specs = "\\['*`&<>\"_~!$h";
   for (int i = 0; specs[i]; i++)
     om->special_chars[(unsigned char)specs[i]] = true;
-  om->special_chars['h'] = true;
+
+  for (int i = 0; i < 256; i++)
+    om->escape_table[i] = NULL;
   om->escape_table['&'] = "&amp;";
   om->escape_table['<'] = "&lt;";
   om->escape_table['>'] = "&gt;";
   om->escape_table['"'] = "&quot;";
   om->escape_table['\''] = "&#39;";
-  buf_init(&om->leftover, 1024);
+
+  buf_init(&om->leftover, 4096);
 }
 
 void octomark_free(OctoMark *om) { buf_free(&om->leftover); }
+
+static void close_active_blocks(OctoMark *om, Buffer *out) {
+  if (om->in_dl) {
+    buf_append(out, "</dl>\n");
+    om->in_dl = false;
+  }
+  if (om->in_table) {
+    buf_append(out, "</tbody></table>\n");
+    om->in_table = false;
+  }
+}
 
 static inline void escape_buf(const OctoMark *restrict om,
                               const char *restrict str, size_t len,
@@ -141,166 +138,206 @@ static inline int find_special_swar(const OctoMark *restrict om,
     specials |= (uint64_t)om->special_chars[(word >> 48) & 0xFF] << 48;
     specials |= (uint64_t)om->special_chars[(word >> 56) & 0xFF] << 56;
     if (specials) {
-      for (int k = 0; k < 8; k++) {
+#if defined(__GNUC__) || defined(__clang__)
+      return i + (__builtin_ctzll(specials) >> 3);
+#else
+      for (int k = 0; k < 8; k++)
         if (om->special_chars[(unsigned char)text[i + k]])
-          return (int)(i + k);
-      }
+          return i + k;
+#endif
     }
     i += 8;
   }
-  while (i < len) {
-    if (om->special_chars[(unsigned char)text[i]])
-      return (int)i;
+  while (i < len && !om->special_chars[(unsigned char)text[i]])
     i++;
-  }
-  return -1;
+  return (int)i;
 }
 
 void parse_inline(const OctoMark *restrict om, const char *restrict text,
                   size_t len, Buffer *restrict out) {
   size_t i = 0;
   while (i < len) {
-    int next_special = find_special_swar(om, text + i, len - i);
-    if (next_special == -1) {
-      buf_append_n(out, text + i, len - i);
+    int next_spec = find_special_swar(om, text + i, len - i);
+    if (next_spec > 0)
+      buf_append_n(out, text + i, next_spec);
+    i += next_spec;
+    if (i >= len)
       break;
-    }
-    if (next_special > 0) {
-      buf_append_n(out, text + i, next_special);
-      i += next_special;
-    }
 
     char c = text[i];
-    size_t rem = len - i;
-
-    if (c == '\\' && rem > 1) {
-      char escaped = text[i + 1];
-      const char *esc = om->escape_table[(unsigned char)escaped];
-      if (esc)
-        buf_append(out, esc);
+    if (c == '\\' && i + 1 < len) {
+      buf_push(out, text[++i]);
+    } else if (c == '*' || c == '_') {
+      int count = 1;
+      while (i + 1 < len && text[i + 1] == c) {
+        count++;
+        i++;
+      }
+      if (count >= 2)
+        buf_append(out, "<strong>");
       else
-        buf_push(out, escaped);
-      i += 2;
-      continue;
-    }
-
-    if (c == '[' || (c == '!' && rem > 1 && text[i + 1] == '[')) {
-      bool img = (c == '!');
-      size_t off = img ? 1 : 0;
-      const char *close_b =
-          (const char *)memchr(text + i + off + 1, ']', len - (i + off + 1));
-      if (close_b && (size_t)(close_b - text + 1) < len &&
-          *(close_b + 1) == '(') {
-        const char *close_p =
-            (const char *)memchr(close_b + 2, ')', len - (close_b - text + 2));
-        if (close_p) {
-          size_t url_len = close_p - (close_b + 2);
-          bool has_space = false;
-          for (size_t k = 0; k < url_len; k++)
-            if (isspace(close_b[2 + k])) {
-              has_space = true;
-              break;
-            }
-          if (!has_space) {
-            if (img) {
-              buf_append(out, "<img src=\"");
-              escape_buf(om, close_b + 2, url_len, out);
-              buf_append(out, "\" alt=\"");
-              escape_buf(om, text + i + 2, close_b - (text + i + 2), out);
-              buf_append(out, "\">");
-            } else {
-              buf_append(out, "<a href=\"");
-              escape_buf(om, close_b + 2, url_len, out);
-              buf_append(out, "\">");
-              parse_inline(om, text + i + 1, close_b - (text + i + 1), out);
-              buf_append(out, "</a>");
-            }
-            i = close_p - text + 1;
-            continue;
+        buf_append(out, "<em>");
+      size_t start = i + 1;
+      int close_count = 0;
+      while (i + 1 < len) {
+        i++;
+        if (text[i] == c) {
+          close_count++;
+          if (close_count == count)
+            break;
+        } else
+          close_count = 0;
+      }
+      parse_inline(om, text + start, i - start - count + 1, out);
+      if (count >= 2)
+        buf_append(out, "</strong>");
+      else
+        buf_append(out, "</em>");
+    } else if (c == '`') {
+      int count = 1;
+      while (i + 1 < len && text[i + 1] == '`') {
+        count++;
+        i++;
+      }
+      buf_append(out, "<code>");
+      size_t start = i + 1;
+      while (i + 1 < len) {
+        i++;
+        bool match = true;
+        for (int k = 0; k < count; k++) {
+          if (i + k >= len || text[i + k] != '`') {
+            match = false;
+            break;
           }
         }
+        if (match)
+          break;
       }
-    }
-
-    if ((c == '*' && rem > 1 && text[i + 1] == '*') ||
-        (c == '~' && rem > 1 && text[i + 1] == '~')) {
-      const char *tag = (c == '*') ? "strong" : "del";
-      const char *marker = (c == '*') ? "**" : "~~";
-      const char *search_start = text + i + 2;
-      const char *close = strstr(search_start, marker);
-      if (close && (size_t)(close - text) < len) {
-        buf_append_n(out, "<", 1);
-        buf_append(out, tag);
-        buf_append_n(out, ">", 1);
-        parse_inline(om, text + i + 2, close - (text + i + 2), out);
-        buf_append_n(out, "</", 2);
-        buf_append(out, tag);
-        buf_append_n(out, ">", 1);
-        i = close - text + 2;
-        continue;
-      }
-    }
-
-    if (c == '_') {
-      const char *close =
-          (const char *)memchr(text + i + 1, '_', len - (i + 1));
-      if (close) {
-        buf_append(out, "<em>");
-        parse_inline(om, text + i + 1, close - (text + i + 1), out);
-        buf_append(out, "</em>");
-        i = close - text + 1;
-        continue;
-      }
-    }
-    if (c == '`') {
-      const char *close =
-          (const char *)memchr(text + i + 1, '`', len - (i + 1));
-      if (close) {
-        buf_append(out, "<code>");
-        escape_buf(om, text + i + 1, close - (text + i + 1), out);
-        buf_append(out, "</code>");
-        i = close - text + 1;
-        continue;
-      }
-    }
-    if (c == '$') {
-      const char *close =
-          (const char *)memchr(text + i + 1, '$', len - (i + 1));
-      if (close) {
-        buf_append(out, "<span class=\"math\">");
-        escape_buf(om, text + i + 1, close - (text + i + 1), out);
-        buf_append(out, "</span>");
-        i = close - text + 1;
-        continue;
-      }
-    }
-    if (c == 'h' && rem >= 7 && strncmp(text + i, "http", 4) == 0) {
-      bool full = (strncmp(text + i, "http://", 7) == 0) ||
-                  (rem >= 8 && strncmp(text + i, "https://", 8) == 0);
-      if (full) {
-        size_t k = 0;
-        while (i + k < len && !isspace(text[i + k]) &&
-               !strchr("<>\"'[]()", text[i + k]))
-          k++;
-        if (k > 7) {
-          buf_append(out, "<a href=\"");
-          escape_buf(om, text + i, k, out);
-          buf_append(out, "\">");
-          escape_buf(om, text + i, k, out);
-          buf_append(out, "</a>");
-          i += k;
-          continue;
+      escape_buf(om, text + start, i - start, out);
+      buf_append(out, "</code>");
+      i += count - 1;
+    } else if (c == '~' && i + 1 < len && text[i + 1] == '~') {
+      buf_append(out, "<del>");
+      i += 2;
+      size_t start = i;
+      while (i + 1 < len && !(text[i] == '~' && text[i + 1] == '~'))
+        i++;
+      parse_inline(om, text + start, i - start, out);
+      buf_append(out, "</del>");
+      i++;
+    } else if (c == '!') {
+      if (i + 1 < len && text[i + 1] == '[') {
+        i += 2;
+        size_t label_start = i;
+        int depth = 1;
+        while (i < len && depth > 0) {
+          if (text[i] == '[')
+            depth++;
+          else if (text[i] == ']')
+            depth--;
+          i++;
         }
+        if (i < len && text[i] == '(') {
+          size_t label_len = i - label_start - 1;
+          i++;
+          size_t url_start = i;
+          while (i < len && text[i] != ')')
+            i++;
+          buf_append(out, "<img src=\"");
+          buf_append_n(out, text + url_start, i - url_start);
+          buf_append(out, "\" alt=\"");
+          buf_append_n(out, text + label_start, label_len);
+          buf_append(out, "\">");
+        }
+      } else
+        buf_push(out, '!');
+    } else if (c == '[') {
+      i++;
+      size_t label_start = i;
+      int depth = 1;
+      while (i < len && depth > 0) {
+        if (text[i] == '[')
+          depth++;
+        else if (text[i] == ']')
+          depth--;
+        i++;
       }
-    }
-
-    const char *esc = om->escape_table[(unsigned char)c];
-    if (esc)
-      buf_append(out, esc);
+      if (i < len && text[i] == '(') {
+        size_t label_len = i - label_start - 1;
+        i++;
+        size_t url_start = i;
+        while (i < len && text[i] != ')')
+          i++;
+        buf_append(out, "<a href=\"");
+        buf_append_n(out, text + url_start, i - url_start);
+        buf_append(out, "\">");
+        parse_inline(om, text + label_start, label_len, out);
+        buf_append(out, "</a>");
+      }
+    } else if (c == 'h' && (strncmp(text + i, "http://", 7) == 0 ||
+                            strncmp(text + i, "https://", 8) == 0)) {
+      size_t start = i;
+      while (i < len && !isspace(text[i]) && text[i] != '<' && text[i] != '>')
+        i++;
+      buf_append(out, "<a href=\"");
+      buf_append_n(out, text + start, i - start);
+      buf_append(out, "\">");
+      buf_append_n(out, text + start, i - start);
+      buf_append(out, "</a>");
+      i--; // Compensate for i++ at loop end
+    } else if (c == '<') {
+      size_t start = i + 1;
+      while (i < len && text[i] != '>')
+        i++;
+      if (i < len) {
+        buf_append(out, "<a href=\"");
+        buf_append_n(out, text + start, i - start);
+        buf_append(out, "\">");
+        buf_append_n(out, text + start, i - start);
+        buf_append(out, "</a>");
+      }
+    } else if (c == '$') {
+      buf_append(out, "<span class=\"math\">");
+      i++;
+      size_t start = i;
+      while (i < len && text[i] != '$')
+        i++;
+      escape_buf(om, text + start, i - start, out);
+      buf_append(out, "</span>");
+    } else if (om->escape_table[(unsigned char)c])
+      buf_append(out, om->escape_table[(unsigned char)c]);
     else
       buf_push(out, c);
     i++;
   }
+}
+
+static size_t split_row(const char *line, size_t len, const char **cells,
+                        size_t *cell_lens) {
+  size_t count = 0;
+  size_t i = 0;
+  while (i < len && isspace(line[i]))
+    i++;
+  if (i < len && line[i] == '|')
+    i++;
+  while (i < len) {
+    while (i < len && isspace(line[i]))
+      i++;
+    if (i >= len || line[i] == '\n')
+      break;
+    cells[count] = line + i;
+    size_t start = i;
+    while (i < len && line[i] != '|' && line[i] != '\n')
+      i++;
+    size_t end = i;
+    while (end > start && isspace(line[end - 1]))
+      end--;
+    cell_lens[count] = end - start;
+    count++;
+    if (i < len && line[i] == '|')
+      i++;
+  }
+  return count;
 }
 
 bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
@@ -315,6 +352,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   bool empty = (t_s == t_e);
 
   if (!om->in_code && empty) {
+    close_active_blocks(om, out);
     while (om->list_stack.size > 0) {
       if (om->list_item_open[om->list_stack.size - 1]) {
         buf_append(out, "</li>\n");
@@ -322,10 +360,6 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       }
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
-    }
-    if (om->in_table) {
-      buf_append(out, "</tbody></table>\n");
-      om->in_table = false;
     }
     return false;
   }
@@ -348,14 +382,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
-    if (om->in_table) {
-      buf_append(out, "</tbody></table>\n");
-      om->in_table = false;
-    }
+    close_active_blocks(om, out);
     if (!om->in_code) {
       buf_append(out, "<pre><code");
       size_t lang_len = 0;
@@ -374,15 +401,11 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
-    if (om->in_table) {
-      buf_append(out, "</tbody></table>\n");
-      om->in_table = false;
-    }
-    buf_append(out, om->in_math ? "</div>\n" : "<div class=\"math\">");
+    close_active_blocks(om, out);
+    if (!om->in_math)
+      buf_append(out, "<div class=\"math\">");
+    else
+      buf_append(out, "</div>\n");
     om->in_math = !om->in_math;
     return false;
   }
@@ -396,25 +419,17 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   bool is_ul = (rlen >= 2 && rel[0] == '-' && rel[1] == ' ');
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
+    close_active_blocks(om, out);
     int tag_type = is_ul ? 0 : 1;
-    // A. Shallow return: Pop deeper levels and close their items
     while (om->list_stack.size > indent + 1) {
       if (om->list_item_open[om->list_stack.size - 1])
         buf_append(out, "</li>\n");
       om->list_item_open[om->list_stack.size - 1] = false;
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
-      // After popping a level, the parent <li> of that level is now the active
-      // item at the new size-1
       if (om->list_stack.size > 0)
         om->list_item_open[om->list_stack.size - 1] = true;
     }
-
-    // B. Deeper indent: Push new levels
     while (om->list_stack.size < indent + 1 &&
            om->list_stack.size < MAX_LIST_DEPTH) {
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
@@ -422,25 +437,16 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       om->list_item_open[om->list_stack.size] = false;
       om->list_stack.size++;
     }
-
-    // C. Same level check:
-    if (om->list_item_open[indent]) {
-      // If we are moving to a new item at THIS level, close previous item
-      // first. If we just pushed to this level in Step B,
-      // om->list_item_open[indent] will be false.
+    if (om->list_item_open[indent])
       buf_append(out, "</li>\n");
-    }
-
     if (om->list_stack.types[indent] != tag_type) {
       buf_append(out,
                  om->list_stack.types[indent] == 0 ? "</ul>\n" : "</ol>\n");
       buf_append(out, tag_type == 0 ? "<ul>\n" : "<ol>\n");
       om->list_stack.types[indent] = tag_type;
     }
-
     buf_append(out, "<li>");
     om->list_item_open[indent] = true;
-
     if (is_ul) {
       const char *rest = rel + 2;
       size_t r_l = rlen - 2;
@@ -453,12 +459,10 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
           buf_append(out, " ");
         buf_append(out, "disabled> ");
         parse_inline(om, rest + 4, r_l - 4, out);
-      } else {
+      } else
         parse_inline(om, rest, r_l, out);
-      }
-    } else {
+    } else
       parse_inline(om, rel + 3, rlen - 3, out);
-    }
     return false;
   } else if (om->list_stack.size > 0) {
     while (om->list_stack.size > 0) {
@@ -471,32 +475,19 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '#' && rel[1] == ' ') {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
+    close_active_blocks(om, out);
     buf_append(out, "<h1>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</h1>\n");
   } else if (rlen >= 2 && rel[0] == '>' && rel[1] == ' ') {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
+    close_active_blocks(om, out);
     buf_append(out, "<blockquote>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</blockquote>\n");
   } else if (t_e - t_s == 3 && strncmp(line + t_s, "---", 3) == 0) {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
+    close_active_blocks(om, out);
     buf_append(out, "<hr>\n");
   } else if (rlen > 0 && rel[0] == '|') {
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
     if (!om->in_table) {
       const char *newline = strchr(full + next_pos, '\n');
       if (newline) {
@@ -506,54 +497,51 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
         while (ls < la_l && isspace(la[ls]))
           ls++;
         if (ls < la_l && la[ls] == '|') {
+          close_active_blocks(om, out);
           buf_append(out, "<table><thead><tr>");
           om->table_cols = 0;
           const char *p = la;
           if (*p == '|')
             p++;
-          while (p < la + la_l && om->table_cols < 64) {
-            const char *next_p = (const char *)memchr(p, '|', (la + la_l) - p);
-            if (!next_p)
-              next_p = la + la_l;
-            const char *c = p;
-            while (c < next_p && isspace(*c))
-              c++;
-            bool l = (c < next_p && *c == ':');
-            const char *r_c = next_p - 1;
-            while (r_c > c && isspace(*r_c))
-              r_c--;
-            bool r = (r_c >= c && *r_c == ':');
-            om->table_aligns[om->table_cols++] =
-                (l && r) ? ALIGN_CENTER
-                         : (r ? ALIGN_RIGHT : (l ? ALIGN_LEFT : ALIGN_NONE));
-            p = next_p + 1;
-          }
-          p = rel;
-          if (*p == '|')
-            p++;
-          for (size_t i = 0; i < om->table_cols; i++) {
-            const char *next_p = (const char *)memchr(p, '|', (rel + rlen) - p);
-            size_t cell_len =
-                (next_p ? (size_t)(next_p - p) : (size_t)((rel + rlen) - p));
-            while (cell_len > 0 && isspace(*p)) {
+          while (p < newline) {
+            while (p < newline && isspace(*p))
               p++;
-              cell_len--;
-            }
-            while (cell_len > 0 && isspace(p[cell_len - 1]))
-              cell_len--;
+            if (p >= newline)
+              break;
+            const char *start = p;
+            while (p < newline && *p != '|')
+              p++;
+            const char *end = p;
+            while (end > start && isspace(end[-1]))
+              end--;
+            Align align = ALIGN_NONE;
+            bool left = (start < end && start[0] == ':');
+            bool right = (end > start && end[-1] == ':');
+            if (left && right)
+              align = ALIGN_CENTER;
+            else if (right)
+              align = ALIGN_RIGHT;
+            else if (left)
+              align = ALIGN_LEFT;
+            om->table_aligns[om->table_cols++] = align;
+            if (p < newline && *p == '|')
+              p++;
+          }
+          const char *h_cells[64];
+          size_t h_lens[64];
+          size_t h_count = split_row(line, len, h_cells, h_lens);
+          for (size_t i = 0; i < h_count; i++) {
             buf_append(out, "<th");
-            if (om->table_aligns[i] == ALIGN_LEFT)
+            Align a = (i < om->table_cols) ? om->table_aligns[i] : ALIGN_NONE;
+            if (a == ALIGN_LEFT)
               buf_append(out, " style=\"text-align:left\"");
-            else if (om->table_aligns[i] == ALIGN_CENTER)
+            else if (a == ALIGN_CENTER)
               buf_append(out, " style=\"text-align:center\"");
-            else if (om->table_aligns[i] == ALIGN_RIGHT)
+            else if (a == ALIGN_RIGHT)
               buf_append(out, " style=\"text-align:right\"");
             buf_append(out, ">");
-            parse_inline(om, p, cell_len, out);
+            parse_inline(om, h_cells[i], h_lens[i], out);
             buf_append(out, "</th>");
-            if (!next_p)
-              break;
-            p = next_p + 1;
           }
           buf_append(out, "</tr></thead><tbody>\n");
           om->in_table = true;
@@ -562,41 +550,29 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       }
     }
     if (om->in_table) {
+      const char *b_cells[64];
+      size_t b_lens[64];
+      size_t b_count = split_row(line, len, b_cells, b_lens);
       buf_append(out, "<tr>");
-      const char *p = rel;
-      if (*p == '|')
-        p++;
-      for (size_t i = 0; i < om->table_cols; i++) {
-        const char *next_p = (const char *)memchr(p, '|', (rel + rlen) - p);
-        size_t cell_len =
-            (next_p ? (size_t)(next_p - p) : (size_t)((rel + rlen) - p));
-        while (cell_len > 0 && isspace(*p)) {
-          p++;
-          cell_len--;
-        }
-        while (cell_len > 0 && isspace(p[cell_len - 1]))
-          cell_len--;
+      for (size_t i = 0; i < b_count; i++) {
         buf_append(out, "<td");
-        if (om->table_aligns[i] == ALIGN_LEFT)
+        Align a = (i < om->table_cols) ? om->table_aligns[i] : ALIGN_NONE;
+        if (a == ALIGN_LEFT)
           buf_append(out, " style=\"text-align:left\"");
-        else if (om->table_aligns[i] == ALIGN_CENTER)
+        else if (a == ALIGN_CENTER)
           buf_append(out, " style=\"text-align:center\"");
-        else if (om->table_aligns[i] == ALIGN_RIGHT)
+        else if (a == ALIGN_RIGHT)
           buf_append(out, " style=\"text-align:right\"");
         buf_append(out, ">");
-        parse_inline(om, p, cell_len, out);
+        parse_inline(om, b_cells[i], b_lens[i], out);
         buf_append(out, "</td>");
-        if (!next_p)
-          break;
-        p = next_p + 1;
       }
       buf_append(out, "</tr>\n");
-    } else {
-      buf_append(out, "<p>");
-      parse_inline(om, line + t_s, t_e - t_s, out);
-      buf_append(out, "</p>\n");
+      return false;
     }
-    return false;
+    buf_append(out, "<p>");
+    parse_inline(om, line + t_s, t_e - t_s, out);
+    buf_append(out, "</p>\n");
   } else if (rlen > 0 && rel[0] == ':') {
     if (!om->in_dl) {
       buf_append(out, "<dl>\n");
@@ -613,12 +589,6 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     buf_append(out, "</dd>\n");
     return false;
   } else {
-    if (om->in_table) {
-      buf_append(out, "</tbody></table>\n");
-      om->in_table = false;
-    }
-
-    // Look ahead for definition list item
     const char *next_line = full + next_pos;
     const char *next_newline = strchr(next_line, '\n');
     bool next_is_def = false;
@@ -629,7 +599,6 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       if (p < next_newline && *p == ':')
         next_is_def = true;
     }
-
     if (next_is_def) {
       if (!om->in_dl) {
         buf_append(out, "<dl>\n");
@@ -640,11 +609,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       buf_append(out, "</dt>\n");
       return false;
     }
-
-    if (om->in_dl) {
-      buf_append(out, "</dl>\n");
-      om->in_dl = false;
-    }
+    close_active_blocks(om, out);
     buf_append(out, "<p>");
     parse_inline(om, line + t_s, t_e - t_s, out);
     buf_append(out, "</p>\n");
@@ -696,14 +661,7 @@ void octomark_finish(OctoMark *om, Buffer *out) {
     int t = om->list_stack.types[--om->list_stack.size];
     buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
   }
-  if (om->in_table) {
-    buf_append(out, "</tbody></table>\n");
-    om->in_table = false;
-  }
-  if (om->in_dl) {
-    buf_append(out, "</dl>\n");
-    om->in_dl = false;
-  }
+  close_active_blocks(om, out);
   if (om->in_math) {
     buf_append(out, "</div>\n");
     om->in_math = false;
@@ -741,6 +699,4 @@ int main() {
   octomark_free(&om);
   return 0;
 }
-#endif
-
 #endif
