@@ -86,6 +86,7 @@ typedef struct {
   bool in_code;
   bool in_math;
   bool in_table;
+  bool in_dl;
   Align table_aligns[64];
   size_t table_cols;
   ListStack list_stack;
@@ -347,6 +348,10 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       int t = om->list_stack.types[--om->list_stack.size];
       buf_append(out, t == 0 ? "</ul>\n" : "</ol>\n");
     }
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
@@ -369,6 +374,10 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '$' && rel[1] == '$') {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
@@ -387,6 +396,10 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   bool is_ul = (rlen >= 2 && rel[0] == '-' && rel[1] == ' ');
   bool is_ol = (rlen >= 3 && isdigit(rel[0]) && rel[1] == '.' && rel[2] == ' ');
   if (is_ul || is_ol) {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     int tag_type = is_ul ? 0 : 1;
     // A. Shallow return: Pop deeper levels and close their items
     while (om->list_stack.size > indent + 1) {
@@ -458,16 +471,32 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   }
 
   if (rlen >= 2 && rel[0] == '#' && rel[1] == ' ') {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     buf_append(out, "<h1>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</h1>\n");
   } else if (rlen >= 2 && rel[0] == '>' && rel[1] == ' ') {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     buf_append(out, "<blockquote>");
     parse_inline(om, rel + 2, rlen - 2, out);
     buf_append(out, "</blockquote>\n");
   } else if (t_e - t_s == 3 && strncmp(line + t_s, "---", 3) == 0) {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     buf_append(out, "<hr>\n");
   } else if (rlen > 0 && rel[0] == '|') {
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
+    }
     if (!om->in_table) {
       const char *newline = strchr(full + next_pos, '\n');
       if (newline) {
@@ -568,10 +597,53 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       buf_append(out, "</p>\n");
     }
     return false;
+  } else if (rlen > 0 && rel[0] == ':') {
+    if (!om->in_dl) {
+      buf_append(out, "<dl>\n");
+      om->in_dl = true;
+    }
+    buf_append(out, "<dd>");
+    const char *d_start = rel + 1;
+    size_t d_len = rlen - 1;
+    if (d_len > 0 && d_start[0] == ' ') {
+      d_start++;
+      d_len--;
+    }
+    parse_inline(om, d_start, d_len, out);
+    buf_append(out, "</dd>\n");
+    return false;
   } else {
     if (om->in_table) {
       buf_append(out, "</tbody></table>\n");
       om->in_table = false;
+    }
+
+    // Look ahead for definition list item
+    const char *next_line = full + next_pos;
+    const char *next_newline = strchr(next_line, '\n');
+    bool next_is_def = false;
+    if (next_newline) {
+      const char *p = next_line;
+      while (p < next_newline && isspace(*p))
+        p++;
+      if (p < next_newline && *p == ':')
+        next_is_def = true;
+    }
+
+    if (next_is_def) {
+      if (!om->in_dl) {
+        buf_append(out, "<dl>\n");
+        om->in_dl = true;
+      }
+      buf_append(out, "<dt>");
+      parse_inline(om, line + t_s, t_e - t_s, out);
+      buf_append(out, "</dt>\n");
+      return false;
+    }
+
+    if (om->in_dl) {
+      buf_append(out, "</dl>\n");
+      om->in_dl = false;
     }
     buf_append(out, "<p>");
     parse_inline(om, line + t_s, t_e - t_s, out);
@@ -627,6 +699,10 @@ void octomark_finish(OctoMark *om, Buffer *out) {
   if (om->in_table) {
     buf_append(out, "</tbody></table>\n");
     om->in_table = false;
+  }
+  if (om->in_dl) {
+    buf_append(out, "</dl>\n");
+    om->in_dl = false;
   }
   if (om->in_math) {
     buf_append(out, "</div>\n");
