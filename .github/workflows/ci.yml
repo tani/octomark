@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: master
+
+      - name: Check Formatting
+        run: zig fmt --check .
+
+      - name: Build
+        run: zig build
+
+      - name: Run Tests
+        run: zig build test
+
+      - name: Build Benchmark (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast bench
