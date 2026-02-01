@@ -292,6 +292,23 @@ static size_t split(const char *l, size_t n, const char **c, size_t *s) {
   }
   return cnt;
 }
+static bool is_block(const char *s, size_t len) {
+  if (len >= 3 && strncmp(s, "```", 3) == 0)
+    return true;
+  if (len >= 2 && s[0] == '$' && s[1] == '$')
+    return true;
+  if (len >= 1 && (s[0] == '#' || s[0] == ':'))
+    return true;
+  if (len >= 2 && s[0] == '-' && s[1] == ' ')
+    return true;
+  if (len >= 3 && isdigit(s[0]) && s[1] == '.' && s[2] == ' ')
+    return true;
+  if (len >= 3 && (strncmp(s, "---", 3) == 0 || strncmp(s, "***", 3) == 0 ||
+                   strncmp(s, "___", 3) == 0))
+    return true;
+  return false;
+}
+
 bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
                   const char *restrict full, size_t pos, Buffer *restrict out) {
   if (om->in_code) {
@@ -318,17 +335,20 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     buf_push(out, '\n');
     return false;
   }
+
   size_t ls = 0;
   while (ls < len && line[ls] == ' ')
     ls++;
   const char *rel = line + ls;
   size_t rlen = len - ls;
+
   if (rlen == 0) {
     close_blocks(om, out, false);
     while (om->stack_size > 0 && om->stack[om->stack_size - 1].type >= 2)
       pop(om, out);
     return false;
   }
+
   size_t ql = 0;
   while (rlen > 0 && rel[0] == '>') {
     ql++;
@@ -338,32 +358,18 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       rel++;
       rlen--;
     }
-    while (rlen > 0 && rel[0] == ' ') {
-      rel++;
-      rlen--;
-    }
   }
-  // Lazy blockquote continuation: if we are in a paragraph and this line
-  // doesn't start a new block, keep the current quote level
+
   size_t cur_ql = 0;
   for (size_t k = 0; k < om->stack_size; k++)
     if (om->stack[k].type == T_QUOTE)
       cur_ql++;
+
   if (ql < cur_ql && om->in_p) {
     size_t ti = 0;
     while (ti < rlen && rel[ti] == ' ')
       ti++;
-    bool is_b = (rlen - ti >= 3 && strncmp(rel + ti, "```", 3) == 0) ||
-                (rlen - ti >= 2 && rel[ti] == '$' && rel[ti + 1] == '$') ||
-                (rlen - ti >= 1 && rel[ti] == '#') ||
-                (rlen - ti >= 1 && rel[ti] == ':') ||
-                (rlen - ti >= 2 && rel[ti] == '-' && rel[ti + 1] == ' ') ||
-                (rlen - ti >= 3 && isdigit(rel[ti]) && rel[ti + 1] == '.' &&
-                 rel[ti + 2] == ' ') ||
-                (rlen - ti >= 3 && (strncmp(rel + ti, "---", 3) == 0 ||
-                                    strncmp(rel + ti, "***", 3) == 0 ||
-                                    strncmp(rel + ti, "___", 3) == 0));
-    if (!is_b)
+    if (!is_block(rel + ti, rlen - ti))
       ql = cur_ql;
   }
 
@@ -376,10 +382,9 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
   while (om->stack_size < ql) {
     close_p(om, out);
     buf_append(out, "<blockquote>");
-    om->stack[om->stack_size].type = T_QUOTE;
-    om->stack[om->stack_size].indent = 0;
-    om->stack_size++;
+    om->stack[om->stack_size++] = (Entry){T_QUOTE, 0};
   }
+
   bool hdd = (rlen > 0 && rel[0] == ':');
   if (hdd) {
     rel++;
@@ -388,8 +393,6 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       rel++;
       rlen--;
     }
-  }
-  if (hdd) {
     close_p(om, out);
     bool in_dl = false, in_dd = false;
     for (size_t k = 0; k < om->stack_size; k++) {
@@ -400,25 +403,22 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     }
     if (!in_dl) {
       buf_append(out, "<dl>\n");
-      om->stack[om->stack_size].type = T_DL;
-      om->stack[om->stack_size].indent = (int)ls;
-      om->stack_size++;
+      om->stack[om->stack_size++] = (Entry){T_DL, (int)ls};
     }
-    if (in_dd) {
+    if (in_dd)
       while (om->stack_size > 0 && om->stack[om->stack_size - 1].type != T_DL)
         pop(om, out);
-    }
     buf_append(out, "<dd>");
-    om->stack[om->stack_size].type = T_DD;
-    om->stack[om->stack_size].indent = (int)ls;
-    om->stack_size++;
+    om->stack[om->stack_size++] = (Entry){T_DD, (int)ls};
   }
+
   size_t ils = 0;
   while (ils < rlen && rel[ils] == ' ')
     ils++;
   bool is_u = (rlen - ils >= 2 && rel[ils] == '-' && rel[ils + 1] == ' '),
        is_o = (rlen - ils >= 3 && isdigit(rel[ils]) && rel[ils + 1] == '.' &&
                rel[ils + 2] == ' ');
+
   if (is_u || is_o) {
     int tt = (is_u ? T_UL : T_OL);
     int ci = (int)(ls + ils);
@@ -434,22 +434,20 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     } else {
       close_p(om, out);
       buf_append(out, tt == T_UL ? "<ul>\n<li>" : "<ol>\n<li>");
-      om->stack[om->stack_size].type = tt;
-      om->stack[om->stack_size].indent = ci;
-      om->stack_size++;
+      om->stack[om->stack_size++] = (Entry){tt, ci};
     }
     rel += ils + (is_u ? 2 : 3);
     rlen -= ils + (is_u ? 2 : 3);
     if (is_u && rlen >= 4 && rel[0] == '[' &&
         (rel[1] == ' ' || rel[1] == 'x') && rel[2] == ']' && rel[3] == ' ') {
-      if (rel[1] == 'x')
-        buf_append(out, "<input type=\"checkbox\" checked disabled> ");
-      else
-        buf_append(out, "<input type=\"checkbox\"  disabled> ");
+      buf_append(out, rel[1] == 'x'
+                          ? "<input type=\"checkbox\" checked disabled> "
+                          : "<input type=\"checkbox\"  disabled> ");
       rel += 4;
       rlen -= 4;
     }
   }
+
   if (rlen >= 3 && strncmp(rel, "```", 3) == 0) {
     close_blocks(om, out, false);
     buf_append(out, "<pre><code");
@@ -496,6 +494,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     buf_append(out, "<hr>\n");
     return false;
   }
+
   if (rlen > 0 && rel[0] == '|') {
     if (!om->in_table) {
       const char *nl = full + pos, *nn = strchr(nl, '\n');
@@ -579,6 +578,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       return false;
     }
   }
+
   const char *nl = full + pos, *nn = strchr(nl, '\n');
   if (nn) {
     const char *p = nl;
@@ -588,9 +588,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       close_blocks(om, out, false);
       if (om->stack_size == 0 || om->stack[om->stack_size - 1].type != T_DL) {
         buf_append(out, "<dl>\n");
-        om->stack[om->stack_size].type = T_DL;
-        om->stack[om->stack_size].indent = (int)ls;
-        om->stack_size++;
+        om->stack[om->stack_size++] = (Entry){T_DL, (int)ls};
       }
       buf_append(out, "<dt>");
       parse_inline(om, rel, rlen, out);
@@ -598,6 +596,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
       return false;
     }
   }
+
   bool in_c =
       (om->stack_size > 0 && (om->stack[om->stack_size - 1].type < 2 ||
                               om->stack[om->stack_size - 1].type == T_DD));
@@ -606,6 +605,7 @@ bool process_line(OctoMark *restrict om, const char *restrict line, size_t len,
     om->in_p = true;
   } else if (om->in_p || (in_c && !is_u && !is_o && !hdd))
     buf_push(out, '\n');
+
   bool br = (rlen >= 2 && rel[rlen - 1] == ' ' && rel[rlen - 2] == ' ');
   parse_inline(om, rel, br ? rlen - 2 : rlen, out);
   if (br)
