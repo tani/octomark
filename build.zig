@@ -9,22 +9,22 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // The main library module
     const mod = b.addModule("octomark", .{
         .root_source_file = b.path("src/octomark.zig"),
         .target = target,
+        .optimize = optimize,
     });
 
+    // The CLI executable
     const exe = b.addExecutable(.{
         .name = "octomark",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "octomark", .module = mod },
-            },
-        }),
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    exe.root_module.addImport("octomark", mod);
 
     b.installArtifact(exe);
 
@@ -36,17 +36,14 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Benchmark executable
     const benchmark_exe = b.addExecutable(.{
         .name = "octomark-benchmark",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/benchmark.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "octomark", .module = mod },
-            },
-        }),
+        .root_source_file = b.path("src/benchmark.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    benchmark_exe.root_module.addImport("octomark", mod);
 
     b.installArtifact(benchmark_exe);
 
@@ -55,18 +52,28 @@ pub fn build(b: *std.Build) void {
     bench_step.dependOn(&bench_run.step);
     bench_run.step.dependOn(b.getInstallStep());
 
+    // Tests
     const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/test.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "octomark", .module = mod },
-            },
-        }),
+        .root_source_file = b.path("src/test.zig"),
+        .target = target,
+        .optimize = optimize,
     });
+    tests.root_module.addImport("octomark", mod);
 
     const test_step = b.step("test", "Run tests");
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);
+
+    // Compliance test runner
+    const compliance_exe = b.addExecutable(.{
+        .name = "compliance",
+        .root_source_file = b.path("src/compliance.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    compliance_exe.root_module.addImport("octomark", mod);
+
+    const compliance_step = b.step("compliance", "Run compliance tests");
+    const run_compliance = b.addRunArtifact(compliance_exe);
+    compliance_step.dependOn(&run_compliance.step);
 }
