@@ -37,7 +37,7 @@ pub fn main() !void {
         try parser.init(allocator);
         defer parser.deinit(allocator);
 
-        var write_buffer: [4096]u8 = undefined;
+        var write_buffer: [65536]u8 = undefined;
         var writer = null_file.writer(&write_buffer);
 
         var timer = try std.time.Timer.start();

@@ -11,8 +11,8 @@ pub fn main() !void {
     const stdin = std.fs.File.stdin();
     const stdout = std.fs.File.stdout();
 
-    var read_buffer: [4096]u8 = undefined;
-    var write_buffer: [4096]u8 = undefined;
+    var read_buffer: [65536]u8 = undefined;
+    var write_buffer: [65536]u8 = undefined;
 
     var reader = stdin.reader(&read_buffer);
     var writer = stdout.writer(&write_buffer);
