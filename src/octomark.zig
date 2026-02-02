@@ -595,7 +595,7 @@ pub const OctomarkParser = struct {
                                         em_l = true;
                                     }
                                 }
-                                if (al and std.mem.indexOfAny(u8, lc, " \t\n\\") != null) al = false;
+                                if (al and std.mem.indexOfAny(u8, lc, if (em_l) " \t\n\\" else " \t\n") != null) al = false;
                                 if (al) {
                                     if (!plain) {
                                         try writeAll(o, "<a href=\"");
@@ -1601,8 +1601,8 @@ pub const OctomarkParser = struct {
 
         if (i + 2 < len and std.mem.eql(u8, text[i .. i + 3], "!--")) {
             i += 3;
-            if (i < len and text[i] == '>') return 0;
-            if (i + 1 < len and text[i] == '-' and text[i + 1] == '>') return 0;
+            if (i < len and text[i] == '>') return i + 1;
+            if (i + 1 < len and text[i] == '-' and text[i + 1] == '>') return i + 2;
             while (i + 2 < len) : (i += 1) {
                 if (std.mem.eql(u8, text[i .. i + 3], "-->")) return i + 3;
             }
@@ -1657,6 +1657,8 @@ pub const OctomarkParser = struct {
             if (std.ascii.isAlphabetic(text[i]) or text[i] == '_' or text[i] == ':') {
                 i += 1;
                 while (i < len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '_' or text[i] == '.' or text[i] == ':' or text[i] == '-')) : (i += 1) {}
+
+                const before_eq = i;
                 while (i < len and std.ascii.isWhitespace(text[i])) : (i += 1) {}
                 if (i < len and text[i] == '=') {
                     i += 1;
@@ -1676,6 +1678,8 @@ pub const OctomarkParser = struct {
                         if (std.ascii.isWhitespace(text[i]) or text[i] == '"' or text[i] == '\'' or text[i] == '=' or text[i] == '<' or text[i] == '>' or text[i] == '`') return 0;
                         while (i < len and !std.ascii.isWhitespace(text[i]) and text[i] != '"' and text[i] != '\'' and text[i] != '=' and text[i] != '<' and text[i] != '>' and text[i] != '`') : (i += 1) {}
                     }
+                } else {
+                    i = before_eq;
                 }
             } else return 0;
         }

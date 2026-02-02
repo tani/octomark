@@ -66,3 +66,12 @@ Common failures to ignore or monitor:
 - **Reference Links**: Octomark currently focuses on inline links.
 - **HTML Normalization**: Minor differences in HTML tag self-closing or whitespace.
 - **Deep Nesting**: Octomark has a maximum nesting limit for security.
+
+## Mandatory Reporting
+
+For every compliance test run, you **MUST** report:
+
+- **Result**: Pass/Fail
+- **Failed Tests**: List of failed tests
+- **Failed Examples**: List of failed examples
+- **Percentage**: Percentage of passed examples
