@@ -337,7 +337,7 @@ test "comprehensive cases" {
         tc("No Escape 1", "\\a", "<p>\\a</p>\n", false),
         tc("No Escape 2", "\\0", "<p>\\0</p>\n", false),
         tc("Quote Gap", "> 1\n\n> 2", "<blockquote><p>1</p>\n</blockquote>\n<blockquote><p>2</p>\n</blockquote>\n", false),
-        tc("List Gap", "- 1\n\n- 2", "<ul>\n<li>1</li>\n<li>2</li>\n</ul>\n", false),
+        tc("List Gap", "- 1\n\n- 2", "<ul>\n<li><p>1</p>\n</li>\n<li><p>2</p>\n</li>\n</ul>\n", false),
         tc("Header Gap", "# 1\n\n# 2", "<h1>1</h1>\n<h1>2</h1>\n", false),
         tc("Code Gap", "```\n1\n```\n\n```\n2\n```", "<pre><code>1\n</code></pre>\n<pre><code>2\n</code></pre>\n", false),
         tc("Math Gap", "$$\n1\n$$\n\n$$\n2\n$$", "<div class=\"math\">\n1\n</div>\n<div class=\"math\">\n2\n</div>\n", false),

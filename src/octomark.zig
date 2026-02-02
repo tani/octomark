@@ -42,6 +42,8 @@ const TableAlignment = enum {
 const BlockEntry = struct {
     block_type: BlockType,
     indent_level: i32,
+    content_indent: i32,
+    loose: bool,
 };
 
 const Buffer = std.ArrayListUnmanaged(u8);
@@ -142,6 +144,7 @@ pub const OctomarkParser = struct {
     stack_depth: usize = 0,
     pending_buffer: Buffer = .{},
     paragraph_content: std.ArrayList(u8) = undefined,
+    pending_code_blank_lines: std.ArrayList(usize) = undefined,
     delimiter_stack: [MAX_INLINE_NESTING]Delimiter = undefined,
     delimiter_stack_len: usize = 0,
     replacements: std.ArrayList(Replacement) = undefined,
@@ -228,6 +231,7 @@ pub const OctomarkParser = struct {
         self.* = OctomarkParser{
             .allocator = allocator,
             .paragraph_content = .{},
+            .pending_code_blank_lines = .{},
             .replacements = .{},
         };
         if (builtin.mode == .Debug) {
@@ -242,6 +246,7 @@ pub const OctomarkParser = struct {
     pub fn deinit(self: *OctomarkParser, allocator: std.mem.Allocator) void {
         self.pending_buffer.deinit(allocator);
         self.paragraph_content.deinit(allocator);
+        self.pending_code_blank_lines.deinit(allocator);
         self.replacements.deinit(allocator);
     }
 
@@ -362,7 +367,12 @@ pub const OctomarkParser = struct {
         const _s = parser.startCall(.pushBlock);
         defer parser.endCall(.pushBlock, _s);
         if (parser.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
-        parser.block_stack[parser.stack_depth] = BlockEntry{ .block_type = block_type, .indent_level = indent };
+        parser.block_stack[parser.stack_depth] = BlockEntry{
+            .block_type = block_type,
+            .indent_level = indent,
+            .content_indent = indent,
+            .loose = false,
+        };
         parser.stack_depth += 1;
     }
 
@@ -383,6 +393,9 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.renderAndCloseTopBlock, _s);
         if (parser.stack_depth == 0) return;
         const block_type = parser.block_stack[parser.stack_depth - 1].block_type;
+        if (block_type == .indented_code) {
+            parser.pending_code_blank_lines.clearRetainingCapacity();
+        }
 
         if (parser.paragraph_content.items.len > 0) {
             try parser.parseInlineContent(parser.paragraph_content.items, output);
@@ -958,7 +971,7 @@ pub const OctomarkParser = struct {
             idx -= 1;
             const entry = parser.block_stack[idx];
             if (entry.block_type == .unordered_list or entry.block_type == .ordered_list) {
-                list_indent = entry.indent_level;
+                list_indent = entry.content_indent;
                 break;
             }
         }
@@ -967,7 +980,13 @@ pub const OctomarkParser = struct {
         if (leading_spaces >= required_indent and bt != .paragraph and bt != .table and bt != .code and bt != .math and bt != .indented_code) {
             try parser.closeParagraphIfOpen(output);
             try parser.pushBlock(.indented_code, 0);
+            parser.pending_code_blank_lines.clearRetainingCapacity();
             try writeAll(output, "<pre><code>");
+            const extra_spaces = leading_spaces - required_indent;
+            var pad: usize = 0;
+            while (pad < extra_spaces) : (pad += 1) {
+                try writeByte(output, ' ');
+            }
             try parser.appendEscapedText(line_content, output);
             try writeByte(output, '\n');
             return true;
@@ -983,16 +1002,40 @@ pub const OctomarkParser = struct {
         if (top != .code and top != .math and top != .indented_code) return false;
 
         var text_slice = line;
+        var extra_indent_columns: usize = 0;
+        var prefix_spaces: usize = 0;
         var i: usize = 0;
         while (i < parser.stack_depth) : (i += 1) {
             const block = parser.block_stack[i];
             if (block.block_type == .blockquote) {
-                const trimmed = std.mem.trimLeft(u8, text_slice, " \t");
-                if (trimmed.len > 0 and trimmed[0] == '>') {
-                    text_slice = trimmed[1..];
-                    if (text_slice.len > 0 and (text_slice[0] == ' ' or text_slice[0] == '\t')) {
-                        text_slice = text_slice[1..];
+                var idx: usize = 0;
+                var col: usize = 0;
+                while (idx < text_slice.len) {
+                    const c = text_slice[idx];
+                    if (c == ' ') {
+                        idx += 1;
+                        col += 1;
+                    } else if (c == '\t') {
+                        idx += 1;
+                        col += 4 - (col % 4);
+                    } else break;
+                }
+                if (idx < text_slice.len and text_slice[idx] == '>') {
+                    idx += 1;
+                    col += 1;
+                    if (idx < text_slice.len) {
+                        const next = text_slice[idx];
+                        if (next == ' ') {
+                            idx += 1;
+                            col += 1;
+                        } else if (next == '\t') {
+                            const tab_width = 4 - (col % 4);
+                            idx += 1;
+                            col += tab_width;
+                            if (tab_width > 0) extra_indent_columns += tab_width - 1;
+                        }
                     }
+                    text_slice = text_slice[idx..];
                 } else {
                     return false;
                 }
@@ -1013,15 +1056,30 @@ pub const OctomarkParser = struct {
             }
         } else if (top == .indented_code) {
             const indent = leadingIndent(text_slice);
-            const spaces = indent.columns;
-            const is_blank = (spaces == text_slice.len);
-            if (!is_blank) {
-                if (spaces < 4) {
-                    try parser.renderAndCloseTopBlock(output);
-                    return false;
-                }
-                text_slice = stripIndentColumns(text_slice, 4);
+            const spaces = indent.columns + extra_indent_columns;
+            const is_blank = (indent.idx == text_slice.len);
+            if (is_blank) {
+                const extra = if (spaces > 4) spaces - 4 else 0;
+                try parser.pending_code_blank_lines.append(parser.allocator, extra);
+                return true;
             }
+            if (spaces < 4) {
+                parser.pending_code_blank_lines.clearRetainingCapacity();
+                try parser.renderAndCloseTopBlock(output);
+                return false;
+            }
+            if (parser.pending_code_blank_lines.items.len > 0) {
+                for (parser.pending_code_blank_lines.items) |extra| {
+                    var pad: usize = 0;
+                    while (pad < extra) : (pad += 1) {
+                        try writeByte(output, ' ');
+                    }
+                    try writeByte(output, '\n');
+                }
+                parser.pending_code_blank_lines.clearRetainingCapacity();
+            }
+            prefix_spaces = spaces - 4;
+            text_slice = text_slice[indent.idx..];
         }
 
         if (parser.stack_depth > 0) {
@@ -1032,6 +1090,10 @@ pub const OctomarkParser = struct {
             }
         }
 
+        var pad: usize = 0;
+        while (pad < prefix_spaces) : (pad += 1) {
+            try writeByte(output, ' ');
+        }
         try parser.appendEscapedText(text_slice, output);
         try writeByte(output, '\n');
         return true;
@@ -1212,22 +1274,38 @@ pub const OctomarkParser = struct {
 
         // Unordered list marker: -, *, +
         var is_ul = false;
-        var marker_len: usize = 0;
+        var marker_bytes: usize = 0;
+        var marker_columns: usize = 0;
+        var marker_extra_columns: usize = 0;
         if (line.len - internal_spaces >= 2) {
             const m = line[internal_spaces];
-            if ((m == '-' or m == '*' or m == '+') and line[internal_spaces + 1] == ' ') {
-                is_ul = true;
-                marker_len = 2;
+            if (m == '-' or m == '*' or m == '+') {
+                const next = line[internal_spaces + 1];
+                if (next == ' ' or next == '\t') {
+                    const base_col = leading_spaces.* + internal_spaces + 1;
+                    const tab_width: usize = if (next == '\t') 4 - (base_col % 4) else 1;
+                    marker_bytes = 2;
+                    marker_columns = 2;
+                    if (next == '\t' and tab_width > 0) marker_extra_columns = tab_width - 1;
+                    is_ul = true;
+                }
             }
         }
 
         const is_ol = (line.len - internal_spaces >= 3 and std.ascii.isDigit(line[internal_spaces]) and
-            std.mem.eql(u8, line[internal_spaces + 1 .. internal_spaces + 3], ". "));
+            line[internal_spaces + 1] == '.' and (line[internal_spaces + 2] == ' ' or line[internal_spaces + 2] == '\t'));
 
-        if (is_ol) marker_len = 3;
+        if (is_ol) {
+            const next = line[internal_spaces + 2];
+            const base_col = leading_spaces.* + internal_spaces + 2;
+            const tab_width: usize = if (next == '\t') 4 - (base_col % 4) else 1;
+            marker_bytes = 3;
+            marker_columns = 3;
+            if (next == '\t' and tab_width > 0) marker_extra_columns = tab_width - 1;
+        }
 
         if (is_ul or is_ol) {
-            var remainder = line[internal_spaces + marker_len ..];
+            var remainder = line[internal_spaces + marker_bytes ..];
             // Don't fully trim here, just consume leading space for content
             if (remainder.len > 0 and remainder[0] == ' ') remainder = remainder[1..];
             if (remainder.len == 0) {
@@ -1246,14 +1324,22 @@ pub const OctomarkParser = struct {
             }
 
             const top = parser.currentBlockType();
+            const list_loose = (top == .unordered_list or top == .ordered_list) and parser.block_stack[parser.stack_depth - 1].loose;
             if (top == target_type and parser.block_stack[parser.stack_depth - 1].indent_level == current_indent) {
                 const block_type = parser.currentBlockType();
                 if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
                     try parser.renderAndCloseTopBlock(output);
                 }
                 if (parser.paragraph_content.items.len > 0) {
-                    try parser.parseInlineContent(parser.paragraph_content.items, output);
-                    parser.paragraph_content.clearRetainingCapacity();
+                    if (list_loose and parser.currentBlockType() != .paragraph) {
+                        try writeAll(output, "<p>");
+                        try parser.parseInlineContent(parser.paragraph_content.items, output);
+                        parser.paragraph_content.clearRetainingCapacity();
+                        try writeAll(output, "</p>\n");
+                    } else {
+                        try parser.parseInlineContent(parser.paragraph_content.items, output);
+                        parser.paragraph_content.clearRetainingCapacity();
+                    }
                 }
                 try writeAll(output, "</li>\n<li>");
             } else {
@@ -1262,19 +1348,30 @@ pub const OctomarkParser = struct {
                     try parser.renderAndCloseTopBlock(output);
                 }
                 if (parser.paragraph_content.items.len > 0) {
-                    try parser.parseInlineContent(parser.paragraph_content.items, output);
-                    parser.paragraph_content.clearRetainingCapacity();
+                    if (list_loose and parser.currentBlockType() != .paragraph) {
+                        try writeAll(output, "<p>");
+                        try parser.parseInlineContent(parser.paragraph_content.items, output);
+                        parser.paragraph_content.clearRetainingCapacity();
+                        try writeAll(output, "</p>\n");
+                    } else {
+                        try parser.parseInlineContent(parser.paragraph_content.items, output);
+                        parser.paragraph_content.clearRetainingCapacity();
+                    }
                 }
                 try writeAll(output, if (target_type == .unordered_list) "<ul>\n<li>" else "<ol>\n<li>");
                 try parser.pushBlock(target_type, current_indent);
             }
 
-            leading_spaces.* += internal_spaces + marker_len;
+            const base_indent = leading_spaces.* + internal_spaces + marker_columns;
+            leading_spaces.* = base_indent + marker_extra_columns;
+            var item_content_indent = base_indent;
             if (remainder.len >= 4 and remainder[0] == '[' and (remainder[1] == ' ' or remainder[1] == 'x') and remainder[2] == ']' and remainder[3] == ' ') {
                 try writeAll(output, if (remainder[1] == 'x') "<input type=\"checkbox\" checked disabled> " else "<input type=\"checkbox\"  disabled> ");
                 remainder = remainder[4..];
                 leading_spaces.* += 4;
+                item_content_indent += 4;
             }
+            parser.block_stack[parser.stack_depth - 1].content_indent = @intCast(item_content_indent);
             line_content.* = remainder;
             return true;
         }
@@ -1397,11 +1494,23 @@ pub const OctomarkParser = struct {
         const in_container = (parser.stack_depth > 0 and
             (block_type != null and
                 (@intFromEnum(block_type.?) < @intFromEnum(BlockType.blockquote) or block_type.? == .definition_description)));
+        var list_loose = false;
+        if (parser.stack_depth > 0) {
+            var i: usize = parser.stack_depth;
+            while (i > 0) {
+                i -= 1;
+                const bt = parser.block_stack[i].block_type;
+                if (bt == .unordered_list or bt == .ordered_list) {
+                    list_loose = parser.block_stack[i].loose;
+                    break;
+                }
+            }
+        }
 
-        if (parser.currentBlockType() != .paragraph and !in_container) {
+        if (parser.currentBlockType() != .paragraph and (!in_container or list_loose)) {
             try writeAll(output, "<p>");
             try parser.pushBlock(.paragraph, 0);
-        } else if (parser.currentBlockType() == .paragraph or (in_container and !is_list and !is_dl)) {
+        } else if (parser.currentBlockType() == .paragraph or (in_container and !is_list and !is_dl and !list_loose)) {
             try parser.paragraph_content.append(parser.allocator, '\n');
         }
 
@@ -1422,6 +1531,27 @@ pub const OctomarkParser = struct {
             if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderAndCloseTopBlock(output);
             }
+            var list_idx: ?usize = null;
+            if (parser.stack_depth > 0) {
+                var i: usize = parser.stack_depth;
+                while (i > 0) {
+                    i -= 1;
+                    const bt = parser.block_stack[i].block_type;
+                    if (bt == .unordered_list or bt == .ordered_list) {
+                        list_idx = i;
+                        break;
+                    }
+                }
+            }
+            if (list_idx) |idx| {
+                if (parser.paragraph_content.items.len > 0 and parser.currentBlockType() != .paragraph) {
+                    try writeAll(output, "<p>");
+                    try parser.parseInlineContent(parser.paragraph_content.items, output);
+                    parser.paragraph_content.clearRetainingCapacity();
+                    try writeAll(output, "</p>\n");
+                }
+                parser.block_stack[idx].loose = true;
+            }
             while (parser.stack_depth > 0 and parser.currentBlockType() != null and @intFromEnum(parser.currentBlockType().?) >= @intFromEnum(BlockType.blockquote)) {
                 try parser.renderAndCloseTopBlock(output);
             }
@@ -1429,19 +1559,47 @@ pub const OctomarkParser = struct {
         }
 
         var quote_level: usize = 0;
+        var extra_indent_columns: usize = 0;
         {
             var i: usize = 0;
+            var col: usize = leading_spaces;
             while (i < line_content.len) {
-                while (i < line_content.len and (line_content[i] == ' ' or line_content[i] == '\t')) : (i += 1) {}
+                while (i < line_content.len) {
+                    const c = line_content[i];
+                    if (c == ' ') {
+                        i += 1;
+                        col += 1;
+                    } else if (c == '\t') {
+                        i += 1;
+                        col += 4 - (col % 4);
+                    } else break;
+                }
                 if (i < line_content.len and line_content[i] == '>') {
                     quote_level += 1;
                     i += 1;
-                    if (i < line_content.len and (line_content[i] == ' ' or line_content[i] == '\t')) i += 1;
+                    col += 1;
+                    if (i < line_content.len) {
+                        const next = line_content[i];
+                        if (next == ' ') {
+                            i += 1;
+                            col += 1;
+                        } else if (next == '\t') {
+                            const tab_width = 4 - (col % 4);
+                            i += 1;
+                            col += tab_width;
+                            if (tab_width > 0) extra_indent_columns += tab_width - 1;
+                        }
+                    }
                     line_content = line_content[i..];
                     i = 0;
+                    col = 0;
                 } else break;
             }
         }
+        if (extra_indent_columns > 0) leading_spaces += extra_indent_columns;
+        const post_indent = leadingIndent(line_content);
+        leading_spaces += post_indent.columns;
+        line_content = line_content[post_indent.idx..];
 
         var current_quote_level: usize = 0;
         for (parser.block_stack[0..parser.stack_depth]) |entry| {
@@ -1473,6 +1631,13 @@ pub const OctomarkParser = struct {
 
         const is_dl = try parser.parseDefinitionList(&line_content, &leading_spaces, output);
         const is_list = try parser.parseListItem(&line_content, &leading_spaces, output);
+        if ((is_dl or is_list) and line_content.len > 0) {
+            const extra = leadingIndent(line_content);
+            if (extra.idx > 0) {
+                leading_spaces += extra.columns;
+                line_content = line_content[extra.idx..];
+            }
+        }
 
         if (line_content.len > 0) {
             switch (line_content[0]) {
@@ -1547,7 +1712,7 @@ pub const OctomarkParser = struct {
 
         if (!is_dl and try parser.parseDefinitionTerm(line_content, full_data, current_pos, output)) return false;
 
-        if (!is_list and !is_dl and try parser.parseIndentedCodeBlock(line_content, leading_spaces, output)) return false;
+        if (!is_dl and try parser.parseIndentedCodeBlock(line_content, leading_spaces, output)) return false;
 
         try parser.processParagraph(line_content, is_dl, is_list, output);
         return false;
