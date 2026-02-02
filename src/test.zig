@@ -168,7 +168,7 @@ test "comprehensive cases" {
         tc("Blockquote with List", "> - Item", "<blockquote><ul>\n<li>Item</li>\n</ul>\n</blockquote>\n", false),
         tc("Bold Nested in Italic", "_**Bold**_", "<p><em><strong>Bold</strong></em></p>\n", false),
         tc("Italic Nested in Bold", "**_Italic_**", "<p><strong><em>Italic</em></strong></p>\n", false),
-        tc("Bold Mismatch", "**Bold*", "<p>**Bold*</p>\n", false),
+        tc("Bold Mismatch", "**Bold*", "<p>*<em>Bold</em></p>\n", false),
         tc("Link Empty URL", "[Link]()", "<p><a href=\"\">Link</a></p>\n", false),
         tc("Link Empty Text", "[](url)", "<p><a href=\"url\"></a></p>\n", false),
         tc("Image Empty URL", "![Alt]()", "<p><img src=\"\" alt=\"Alt\"></p>\n", false),
