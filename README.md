@@ -15,7 +15,6 @@ OctoMark is an ultra-high performance, streaming Markdown parser written in Zig.
 - **Turbo Optimized**:
   - **SWAR Scanning**: Scans 8 bytes at a time for special characters using bit-masking.
   - **Zero-Allocation Metadata**: Uses stack-based bitsets and fixed-size arrays for list nesting and table alignments.
-  - **Alias Resolution**: Leverages C99 `restrict` pointers to maximize compiler optimization and vectorization.
 
 ## Performance Benchmark
 
