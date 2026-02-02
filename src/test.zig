@@ -18,16 +18,16 @@ fn render(allocator: std.mem.Allocator, input: []const u8, enable_html: bool) ![
     defer parser.deinit(allocator);
     parser.setOptions(.{ .enable_html = enable_html });
 
-    var reader = std.io.Reader.fixed(input);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input);
+    const reader = fbs.reader();
 
-    try parser.parse(&reader, &writer_alloc.writer, allocator);
+    var writer_alloc = std.ArrayList(u8).init(allocator);
+    defer writer_alloc.deinit();
+    const writer = writer_alloc.writer();
 
-    const result = writer_alloc.writer.buffered();
-    const final = try allocator.alloc(u8, result.len);
-    @memcpy(final, result);
-    return final;
+    try parser.parse(reader, writer, allocator);
+
+    return writer_alloc.toOwnedSlice();
 }
 
 test "octomark cases" {
@@ -98,11 +98,14 @@ test "NestingTooDeep" {
     }
     try input.appendSlice(allocator, "Deep");
 
-    var reader = std.io.Reader.fixed(input.items);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input.items);
+    const reader = fbs.reader();
 
-    const result = parser.parse(&reader, &writer_alloc.writer, allocator);
+    var writer_alloc = std.ArrayList(u8).init(allocator);
+    defer writer_alloc.deinit();
+    const writer = writer_alloc.writer();
+
+    const result = parser.parse(reader, writer, allocator);
     try std.testing.expectError(error.NestingTooDeep, result);
 }
 
