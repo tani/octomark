@@ -53,7 +53,7 @@ pub const OctomarkOptions = struct {
     enable_html: bool = true,
 };
 
-const special_chars = "\\['*`&<>\"'_~!$h\n";
+const special_chars = "\\['*`&<>\"'_~!$\n";
 
 const html_escape_map = blk: {
     var map: [256]?[]const u8 = [_]?[]const u8{null} ** 256;
@@ -386,10 +386,30 @@ pub const OctomarkParser = struct {
         const _s = parser.startCall(.findNextSpecial);
         defer parser.endCall(.findNextSpecial, _s);
         var i = start;
-        while (i < text.len) : (i += 1) {
-            if (special_chars_lut[text[i]]) return i;
+        const len = text.len;
+        // Unrolled loop for speed
+        while (i + 8 <= len) {
+            inline for (0..8) |offset| {
+                const idx = i + offset;
+                const c = text[idx];
+                if (special_chars_lut[c]) return idx;
+                if (c == 'h') {
+                    if (idx + 4 < len and (std.mem.startsWith(u8, text[idx..], "http:") or std.mem.startsWith(u8, text[idx..], "https:"))) return idx;
+                }
+            }
+            i += 8;
         }
-        return text.len;
+
+        while (i < len) : (i += 1) {
+            const c = text[i];
+            if (special_chars_lut[c]) return i;
+            if (c == 'h') {
+                if (i + 4 < text.len and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
+                    return i;
+                }
+            }
+        }
+        return len;
     }
 
     pub fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) anyerror!void {
@@ -529,36 +549,44 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.scanInline, _s);
 
         var i: usize = 0;
+        const delimiters = "*_`<\\";
         while (i < text.len) {
-            const c = text[i];
-            switch (c) {
-                '*', '_' => {
-                    const next = try parser.scanDelimiters(text, i, c, stack_bottom);
-                    i = next;
-                },
-                '`' => {
-                    // Skip code span
-                    var backtick_count: usize = 1;
-                    while (i + backtick_count < text.len and text[i + backtick_count] == '`') {
-                        backtick_count += 1;
-                    }
-                    if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |offset| {
-                        i = i + backtick_count + offset + backtick_count;
-                    } else {
-                        i += backtick_count;
-                    }
-                },
-                '<' => {
-                    // Skip HTML tags
-                    const tag_len = parser.parseHtmlTag(text[i..]);
-                    if (tag_len > 0) {
-                        i += tag_len;
-                    } else {
-                        i += 1;
-                    }
-                },
-                '\\' => i += 2,
-                else => i += 1,
+            const next = std.mem.indexOfAny(u8, text[i..], delimiters);
+            if (next) |offset| {
+                i += offset;
+                const c = text[i];
+                switch (c) {
+                    '*', '_' => {
+                        const next_pos = try parser.scanDelimiters(text, i, c, stack_bottom);
+                        i = next_pos;
+                    },
+                    '`' => {
+                        var backtick_count: usize = 1;
+                        var k = i + 1;
+                        while (k < text.len and text[k] == '`') : (k += 1) {
+                            backtick_count += 1;
+                        }
+
+                        // Optimized search for end
+                        if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |match_offset| {
+                            i = i + backtick_count + match_offset + backtick_count;
+                        } else {
+                            i += backtick_count;
+                        }
+                    },
+                    '<' => {
+                        const tag_len = parser.parseHtmlTag(text[i..]);
+                        if (tag_len > 0) {
+                            i += tag_len;
+                        } else {
+                            i += 1;
+                        }
+                    },
+                    '\\' => i += 2,
+                    else => i += 1,
+                }
+            } else {
+                break;
             }
         }
     }
@@ -1375,8 +1403,9 @@ pub const OctomarkParser = struct {
         if (try parser.processLeafBlockContinuation(line, output)) return false;
 
         var i_trim: usize = 0;
-        while (i_trim < line.len and (line[i_trim] == ' ' or line[i_trim] == '\t' or line[i_trim] == '\r')) : (i_trim += 1) {}
-        const line_content_trimmed = line[i_trim..];
+        const trimmed = std.mem.trimLeft(u8, line, " \t\r");
+        i_trim = line.len - trimmed.len;
+        const line_content_trimmed = trimmed;
         var leading_spaces: usize = i_trim;
         var line_content = line_content_trimmed;
 
