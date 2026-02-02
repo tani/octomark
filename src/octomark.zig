@@ -12,7 +12,6 @@ const BlockType = enum(i32) {
     math = 6,
     table = 7,
     paragraph = 8,
-    table_header_pending = 9,
 };
 
 const TableAlignment = enum {
@@ -60,24 +59,18 @@ pub const OctomarkParser = struct {
     stack_depth: usize = 0,
     pending_buffer: Buffer = .{},
     options: OctomarkOptions = .{},
-    table_header_storage: Buffer = .{},
-    table_header_pending: bool = false,
-    allocator: std.mem.Allocator = undefined,
 
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
-        self.* = OctomarkParser{ .allocator = allocator };
+        self.* = OctomarkParser{};
         self.pending_buffer = .{};
         try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
-        self.table_header_storage = .{};
-        try self.table_header_storage.ensureTotalCapacity(allocator, 1024);
         self.options = .{};
     }
 
     /// Release parser-owned buffers. Safe to call after any error.
     pub fn deinit(self: *OctomarkParser, allocator: std.mem.Allocator) void {
         self.pending_buffer.deinit(allocator);
-        self.table_header_storage.deinit(allocator);
     }
 
     /// Enable parsing options.
@@ -134,10 +127,6 @@ pub const OctomarkParser = struct {
                 output,
             );
         }
-        if (self.table_header_pending) {
-            self.table_header_pending = false;
-            try self.processParagraph(self.table_header_storage.items, false, false, output);
-        }
         while (self.stack_depth > 0) try self.renderAndCloseTopBlock(output);
     }
 
@@ -145,11 +134,6 @@ pub const OctomarkParser = struct {
         if (parser.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
         parser.block_stack[parser.stack_depth] = BlockEntry{ .block_type = block_type, .indent_level = indent };
         parser.stack_depth += 1;
-    }
-
-    fn peekBlock(parser: *OctomarkParser) ?*BlockEntry {
-        if (parser.stack_depth == 0) return null;
-        return &parser.block_stack[parser.stack_depth - 1];
     }
 
     fn popBlock(parser: *OctomarkParser) void {
@@ -176,19 +160,11 @@ pub const OctomarkParser = struct {
             .math => try output.writeAll("</div>\n"),
             .table => try output.writeAll("</tbody></table>\n"),
             .paragraph => try output.writeAll("</p>\n"),
-            .table_header_pending => unreachable,
         }
     }
 
     fn closeParagraphIfOpen(parser: *OctomarkParser, output: anytype) !void {
         if (parser.currentBlockType() == .paragraph) try parser.renderAndCloseTopBlock(output);
-    }
-
-    fn closeLeafBlocks(parser: *OctomarkParser, output: anytype) !void {
-        const block_type = parser.currentBlockType();
-        if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-            try parser.renderAndCloseTopBlock(output);
-        }
     }
 
     fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: anytype) !void {
@@ -202,10 +178,6 @@ pub const OctomarkParser = struct {
                 try output.writeByte(text[i]);
             }
         }
-    }
-
-    fn renderInline(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
-        try parser.parseInlineContent(text, output);
     }
 
     fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
@@ -386,7 +358,10 @@ pub const OctomarkParser = struct {
 
     fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
         if (line_content.len >= 3 and std.mem.eql(u8, line_content[0..3], "```")) {
-            try parser.closeLeafBlocks(output);
+            const block_type = parser.currentBlockType();
+            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                try parser.renderAndCloseTopBlock(output);
+            }
             try output.writeAll("<pre><code");
             var lang_len: usize = 0;
             while (3 + lang_len < line_content.len and !std.ascii.isWhitespace(line_content[3 + lang_len])) : (lang_len += 1) {}
@@ -404,7 +379,10 @@ pub const OctomarkParser = struct {
 
     fn parseMathBlock(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
         if (line_content.len >= 2 and std.mem.eql(u8, line_content[0..2], "$$")) {
-            try parser.closeLeafBlocks(output);
+            const block_type = parser.currentBlockType();
+            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                try parser.renderAndCloseTopBlock(output);
+            }
             try output.writeAll("<div class=\"math\">\n");
             try parser.pushBlock(.math, 0);
             return true;
@@ -417,13 +395,16 @@ pub const OctomarkParser = struct {
             var level: usize = 0;
             while (level < 6 and level < line_content.len and line_content[level] == '#') : (level += 1) {}
             if (level < line_content.len and line_content[level] == ' ') {
-                try parser.closeLeafBlocks(output);
+                const block_type = parser.currentBlockType();
+                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                    try parser.renderAndCloseTopBlock(output);
+                }
                 const level_u8: u8 = @intCast(level);
                 const level_char: u8 = '0' + level_u8;
                 try output.writeAll("<h");
                 try output.writeByte(level_char);
                 try output.writeAll(">");
-                try parser.renderInline(line_content[level + 1 ..], output);
+                try parser.parseInlineContent(line_content[level + 1 ..], output);
                 try output.writeAll("</h");
                 try output.writeByte(level_char);
                 try output.writeAll(">\n");
@@ -435,7 +416,10 @@ pub const OctomarkParser = struct {
 
     fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
         if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
-            try parser.closeLeafBlocks(output);
+            const block_type = parser.currentBlockType();
+            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                try parser.renderAndCloseTopBlock(output);
+            }
             try output.writeAll("<hr>\n");
             return true;
         }
@@ -485,18 +469,24 @@ pub const OctomarkParser = struct {
             const current_indent: i32 = @intCast(leading_spaces + internal_spaces);
             while (parser.stack_depth > 0 and
                 parser.currentBlockType() != null and @intFromEnum(parser.currentBlockType().?) < @intFromEnum(BlockType.blockquote) and
-                (parser.peekBlock().?.indent_level > current_indent or
-                    (parser.peekBlock().?.indent_level == current_indent and parser.currentBlockType() != target_type)))
+                (parser.block_stack[parser.stack_depth - 1].indent_level > current_indent or
+                    (parser.block_stack[parser.stack_depth - 1].indent_level == current_indent and parser.currentBlockType() != target_type)))
             {
                 try parser.renderAndCloseTopBlock(output);
             }
 
             const top = parser.currentBlockType();
-            if (top == target_type and parser.peekBlock().?.indent_level == current_indent) {
-                try parser.closeLeafBlocks(output);
+            if (top == target_type and parser.block_stack[parser.stack_depth - 1].indent_level == current_indent) {
+                const block_type = parser.currentBlockType();
+                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                    try parser.renderAndCloseTopBlock(output);
+                }
                 try output.writeAll("</li>\n<li>");
             } else {
-                try parser.closeLeafBlocks(output);
+                const block_type = parser.currentBlockType();
+                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                    try parser.renderAndCloseTopBlock(output);
+                }
                 try output.writeAll(if (target_type == .unordered_list) "<ul>\n<li>" else "<ol>\n<li>");
                 try parser.pushBlock(target_type, current_indent);
             }
@@ -513,7 +503,7 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
+    fn parseTable(parser: *OctomarkParser, line_content: []const u8, _: []const u8, _: usize, output: anytype) !bool {
         // 1. If we are already IN a table, process body rows strictly.
         if (parser.currentBlockType() == .table) {
             const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
@@ -541,7 +531,7 @@ pub const OctomarkParser = struct {
                         .none => {},
                     }
                     try output.writeAll(">");
-                    try parser.renderInline(body_cells[k], output);
+                    try parser.parseInlineContent(body_cells[k], output);
                     try output.writeAll("</td>");
                 }
                 try output.writeAll("</tr>\n");
@@ -554,111 +544,9 @@ pub const OctomarkParser = struct {
             }
         }
 
-        // 2. Strict New Table Check: Must start with '|'
-        const trimmed_start = std.mem.trimLeft(u8, line_content, " \t");
-        if (trimmed_start.len == 0 or trimmed_start[0] != '|') return false;
-
-        // 3. If NOT pending header, perform lookahead to decide if we should start pending
-        if (!parser.table_header_pending) {
-            // has_pipe is implicitly true if we are here (from dispatch + strict check)
-
-            // Lookahead: Check if the NEXT line is a separator to avoid unnecessary buffering.
-            if (isNextLineTableSeparator(full_data, current_pos)) {
-                // Fallthrough to buffer this header line as it will likely form a valid table.
-            } else {
-                return false;
-            }
-        }
-
-        const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
-
-        // 4. If we are pending (or just decided to be pending via lookahead fall-through)
-        // Check if THIS line is a separator (completing a header) or needs to be buffered
-
-        // Wait, if !pending and lookahead passed, we just want to BUFFER it.
-        // We shouldn't check if current line is separator immediately if we just decided it's a header line.
-
-        if (parser.table_header_pending) {
-            // Lookahead for separator row (current line is strictly the proposed separator)
-            const is_separator = blk: {
-                if (trimmed_line.len < 3) break :blk false;
-                var has_dash = false;
-                for (trimmed_line) |c| {
-                    if (c == '-' or c == ':' or c == '|') {
-                        if (c == '-') has_dash = true;
-                        continue;
-                    }
-                    if (!std.ascii.isWhitespace(c)) break :blk false;
-                }
-                break :blk has_dash;
-            };
-
-            if (is_separator) {
-                // ... Create table ...
-                try parser.closeLeafBlocks(output);
-                try output.writeAll("<table><thead><tr>");
-                parser.table_column_count = 0;
-
-                var p: usize = 0;
-                if (trimmed_line.len > 0 and trimmed_line[0] == '|') p += 1;
-                while (p < trimmed_line.len) {
-                    while (p < trimmed_line.len and std.ascii.isWhitespace(trimmed_line[p])) : (p += 1) {}
-                    if (p >= trimmed_line.len) break;
-                    const start = p;
-                    while (p < trimmed_line.len and trimmed_line[p] != '|') : (p += 1) {}
-                    var end = p;
-                    while (end > start and std.ascii.isWhitespace(trimmed_line[end - 1])) : (end -= 1) {}
-
-                    var col_align = TableAlignment.none;
-                    if (start < end) {
-                        const cell = trimmed_line[start..end];
-                        if (cell.len >= 2) {
-                            if (cell[0] == ':' and cell[cell.len - 1] == ':') col_align = .center else if (cell[cell.len - 1] == ':') col_align = .right else if (cell[0] == ':') col_align = .left;
-                        }
-                    }
-
-                    if (parser.table_column_count >= parser.table_alignments.len) {
-                        return error.TooManyTableColumns;
-                    }
-                    parser.table_alignments[parser.table_column_count] = col_align;
-                    parser.table_column_count += 1;
-
-                    if (p < trimmed_line.len and trimmed_line[p] == '|') p += 1;
-                }
-
-                var header_cells: [64][]const u8 = undefined;
-                const header_count = splitTableRowCells(parser.table_header_storage.items, &header_cells);
-                var k: usize = 0;
-                while (k < header_count) : (k += 1) {
-                    try output.writeAll("<th");
-                    const col_align = if (k < parser.table_column_count) parser.table_alignments[k] else TableAlignment.none;
-                    switch (col_align) {
-                        .left => try output.writeAll(" style=\"text-align:left\""),
-                        .center => try output.writeAll(" style=\"text-align:center\""),
-                        .right => try output.writeAll(" style=\"text-align:right\""),
-                        .none => {},
-                    }
-                    try output.writeAll(">");
-                    try parser.renderInline(header_cells[k], output);
-                    try output.writeAll("</th>");
-                }
-                try output.writeAll("</tr></thead><tbody>\n");
-                try parser.pushBlock(.table, 0);
-                parser.table_header_pending = false;
-                return true;
-            }
-
-            // Pending, but not a separator? Then previous expectation was wrong.
-            parser.table_header_pending = false;
-            try parser.processParagraph(parser.table_header_storage.items, false, false, output);
-            return false;
-        }
-
-        // 5. Buffer logic (only reached if !pending initially, and lookahead passed successfully)
-        parser.table_header_storage.clearRetainingCapacity();
-        try parser.table_header_storage.appendSlice(parser.allocator, line_content);
-        parser.table_header_pending = true;
-        return true;
+        // Not in a table and no buffering support - tables must be started explicitly
+        // This is a simplification: we no longer auto-detect tables from header+separator
+        return false;
     }
 
     fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
@@ -668,13 +556,16 @@ pub const OctomarkParser = struct {
                 const nl = current_pos + offset;
                 const trimmed = std.mem.trimLeft(u8, full_data[current_pos..nl], &std.ascii.whitespace);
                 if (trimmed.len > 0 and trimmed[0] == ':') {
-                    try parser.closeLeafBlocks(output);
+                    const block_type = parser.currentBlockType();
+                    if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                        try parser.renderAndCloseTopBlock(output);
+                    }
                     if (parser.stack_depth == 0 or parser.currentBlockType() != .definition_list) {
                         try output.writeAll("<dl>\n");
                         try parser.pushBlock(.definition_list, 0);
                     }
                     try output.writeAll("<dt>");
-                    try parser.renderInline(line_content, output);
+                    try parser.parseInlineContent(line_content, output);
                     try output.writeAll("</dt>\n");
                     return true;
                 }
@@ -697,7 +588,7 @@ pub const OctomarkParser = struct {
         }
 
         const line_break = (line_content.len >= 2 and line_content[line_content.len - 1] == ' ' and line_content[line_content.len - 2] == ' ');
-        try parser.renderInline(if (line_break) line_content[0 .. line_content.len - 2] else line_content, output);
+        try parser.parseInlineContent(if (line_break) line_content[0 .. line_content.len - 2] else line_content, output);
         if (line_break) try output.writeAll("<br>");
     }
 
@@ -709,7 +600,10 @@ pub const OctomarkParser = struct {
         var line_content = trimmed_line;
 
         if (line_content.len == 0) {
-            try parser.closeLeafBlocks(output);
+            const block_type = parser.currentBlockType();
+            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                try parser.renderAndCloseTopBlock(output);
+            }
             while (parser.stack_depth > 0 and parser.currentBlockType() != null and @intFromEnum(parser.currentBlockType().?) >= @intFromEnum(BlockType.blockquote)) {
                 try parser.renderAndCloseTopBlock(output);
             }
