@@ -595,7 +595,7 @@ pub const OctomarkParser = struct {
                                         em_l = true;
                                     }
                                 }
-                                if (al and std.mem.indexOfAny(u8, lc, " \t\n") != null) al = false;
+                                if (al and std.mem.indexOfAny(u8, lc, " \t\n\\") != null) al = false;
                                 if (al) {
                                     if (!plain) {
                                         try writeAll(o, "<a href=\"");
@@ -1601,6 +1601,8 @@ pub const OctomarkParser = struct {
 
         if (i + 2 < len and std.mem.eql(u8, text[i .. i + 3], "!--")) {
             i += 3;
+            if (i < len and text[i] == '>') return 0;
+            if (i + 1 < len and text[i] == '-' and text[i + 1] == '>') return 0;
             while (i + 2 < len) : (i += 1) {
                 if (std.mem.eql(u8, text[i .. i + 3], "-->")) return i + 3;
             }
