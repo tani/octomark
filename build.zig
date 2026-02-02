@@ -63,4 +63,21 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     const run_tests = b.addRunArtifact(tests);
     test_step.dependOn(&run_tests.step);
+
+    const profile_exe = b.addExecutable(.{
+        .name = "octomark-profile",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/profile.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    profile_exe.root_module.addImport("octomark", mod);
+
+    b.installArtifact(profile_exe);
+
+    const profile_step = b.step("profile", "Run profiling");
+    const profile_run = b.addRunArtifact(profile_exe);
+    profile_step.dependOn(&profile_run.step);
+    profile_run.step.dependOn(b.getInstallStep());
 }
