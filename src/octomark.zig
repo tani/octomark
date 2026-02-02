@@ -205,28 +205,14 @@ pub const OctomarkParser = struct {
     }
 
     fn renderInline(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
-        try parser.parseInlineContent(text, output, 0);
+        try parser.parseInlineContent(text, output);
     }
 
-    fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype, abs_offset: usize) !void {
+    fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
         const length = text.len;
         var i: usize = 0;
         while (i < length) {
             const start = i;
-            while (i + 7 < length) {
-                if (is_special_char[text[i]] or
-                    is_special_char[text[i + 1]] or
-                    is_special_char[text[i + 2]] or
-                    is_special_char[text[i + 3]] or
-                    is_special_char[text[i + 4]] or
-                    is_special_char[text[i + 5]] or
-                    is_special_char[text[i + 6]] or
-                    is_special_char[text[i + 7]])
-                {
-                    break;
-                }
-                i += 8;
-            }
 
             while (i < length and !is_special_char[text[i]]) : (i += 1) {}
 
@@ -260,7 +246,7 @@ pub const OctomarkParser = struct {
 
                 if (found_at) |j| {
                     try output.writeAll("<em>");
-                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
+                    try parser.parseInlineContent(text[content_start..j], output);
                     try output.writeAll("</em>");
                     i = j;
                 } else {
@@ -275,7 +261,7 @@ pub const OctomarkParser = struct {
 
                 if (found_at) |j| {
                     try output.writeAll("<strong>");
-                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
+                    try parser.parseInlineContent(text[content_start..j], output);
                     try output.writeAll("</strong>");
                     i = j + 1;
                 } else {
@@ -323,7 +309,7 @@ pub const OctomarkParser = struct {
 
                 if (found_at) |j| {
                     try output.writeAll("<del>");
-                    try parser.parseInlineContent(text[content_start..j], output, abs_offset + content_start);
+                    try parser.parseInlineContent(text[content_start..j], output);
                     try output.writeAll("</del>");
                     i = j + 1;
                 } else {
@@ -368,7 +354,7 @@ pub const OctomarkParser = struct {
                                 try output.writeAll("<a href=\"");
                                 try output.writeAll(url);
                                 try output.writeAll("\">");
-                                try parser.parseInlineContent(label, output, abs_offset + bracket_start_idx);
+                                try parser.parseInlineContent(label, output);
                                 try output.writeAll("</a>");
                             }
                             i = url_end_idx;
