@@ -71,39 +71,55 @@ pub const OctomarkParser = struct {
     pending_buffer: Buffer = .{},
     options: OctomarkOptions = .{},
     stats: if (builtin.mode == .Debug) Stats else struct {} = .{},
+    timer: if (builtin.mode == .Debug) std.time.Timer else struct {} = undefined,
 
     const Stats = struct {
-        feed: usize = 0,
-        processSingleLine: usize = 0,
-        parseInlineContent: usize = 0,
-        parseHeader: usize = 0,
-        parseHorizontalRule: usize = 0,
-        parseFencedCodeBlock: usize = 0,
-        parseMathBlock: usize = 0,
-        parseListItem: usize = 0,
-        parseTable: usize = 0,
-        parseDefinitionList: usize = 0,
-        parseDefinitionTerm: usize = 0,
-        appendEscapedText: usize = 0,
-        findNextSpecial: usize = 0,
-        renderAndCloseTopBlock: usize = 0,
-        pushBlock: usize = 0,
-        popBlock: usize = 0,
-        parseHtmlTag: usize = 0,
-        splitTableRowCells: usize = 0,
-        isBlockStartMarker: usize = 0,
-        isNextLineTableSeparator: usize = 0,
+        const Counter = struct {
+            count: usize = 0,
+            time_ns: u64 = 0,
+        };
+        feed: Counter = .{},
+        processSingleLine: Counter = .{},
+        parseInlineContent: Counter = .{},
+        parseHeader: Counter = .{},
+        parseHorizontalRule: Counter = .{},
+        parseFencedCodeBlock: Counter = .{},
+        parseMathBlock: Counter = .{},
+        parseListItem: Counter = .{},
+        parseTable: Counter = .{},
+        parseDefinitionList: Counter = .{},
+        parseDefinitionTerm: Counter = .{},
+        appendEscapedText: Counter = .{},
+        findNextSpecial: Counter = .{},
+        renderAndCloseTopBlock: Counter = .{},
+        pushBlock: Counter = .{},
+        popBlock: Counter = .{},
+        parseHtmlTag: Counter = .{},
+        splitTableRowCells: Counter = .{},
+        isBlockStartMarker: Counter = .{},
+        isNextLineTableSeparator: Counter = .{},
     };
 
-    inline fn countCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats)) void {
+    inline fn startCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats)) u64 {
         if (builtin.mode == .Debug) {
-            @field(self.stats, @tagName(field)) += 1;
+            @field(self.stats, @tagName(field)).count += 1;
+            return self.timer.read();
+        }
+        return 0;
+    }
+
+    inline fn endCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats), start_ns: u64) void {
+        if (builtin.mode == .Debug) {
+            @field(self.stats, @tagName(field)).time_ns += self.timer.read() - start_ns;
         }
     }
 
     /// Initialize parser state. Returns error.OutOfMemory on allocation failure.
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
         self.* = OctomarkParser{};
+        if (builtin.mode == .Debug) {
+            self.timer = try std.time.Timer.start();
+        }
         self.pending_buffer = .{};
         try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
         self.options = .{};
@@ -141,11 +157,21 @@ pub const OctomarkParser = struct {
 
     pub fn dumpStats(self: *const OctomarkParser) void {
         if (builtin.mode == .Debug) {
-            std.debug.print("\n--- Octomark Debug Stats ---\n", .{});
+            std.debug.print("\n--- Octomark Debug Stats (per function) ---\n", .{});
+            std.debug.print("{s: <25} | {s: >10} | {s: >15} | {s: >15}\n", .{ "Function", "Calls", "Total Time", "Avg Call" });
+            std.debug.print("--------------------------|------------|-----------------|----------------\n", .{});
             inline for (std.meta.fields(Stats)) |f| {
-                std.debug.print("{s: <25}: {d}\n", .{ f.name, @field(self.stats, f.name) });
+                const counter = @field(self.stats, f.name);
+                const total_ms = @as(f64, @floatFromInt(counter.time_ns)) / 1_000_000.0;
+                const avg_ns = if (counter.count > 0) counter.time_ns / counter.count else 0;
+                std.debug.print("{s: <25} | {d: >10} | {d: >12.3} ms | {d: >12.3} ns\n", .{
+                    f.name,
+                    counter.count,
+                    total_ms,
+                    @as(f64, @floatFromInt(avg_ns)),
+                });
             }
-            std.debug.print("----------------------------\n", .{});
+            std.debug.print("-------------------------------------------\n", .{});
         }
     }
 
@@ -173,7 +199,8 @@ pub const OctomarkParser = struct {
 
     /// Feed a chunk into the parser. Returns error.OutOfMemory or writer errors.
     pub fn feed(self: *OctomarkParser, chunk: []const u8, output: anytype, allocator: std.mem.Allocator) !void {
-        self.countCall(.feed);
+        const _s = self.startCall(.feed);
+        defer self.endCall(.feed, _s);
         try self.pending_buffer.appendSlice(allocator, chunk);
         const data = self.pending_buffer.items;
         const size = self.pending_buffer.items.len;
@@ -214,14 +241,16 @@ pub const OctomarkParser = struct {
     }
 
     fn pushBlock(parser: *OctomarkParser, block_type: BlockType, indent: i32) !void {
-        parser.countCall(.pushBlock);
+        const _s = parser.startCall(.pushBlock);
+        defer parser.endCall(.pushBlock, _s);
         if (parser.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
         parser.block_stack[parser.stack_depth] = BlockEntry{ .block_type = block_type, .indent_level = indent };
         parser.stack_depth += 1;
     }
 
     fn popBlock(parser: *OctomarkParser) void {
-        parser.countCall(.popBlock);
+        const _s = parser.startCall(.popBlock);
+        defer parser.endCall(.popBlock, _s);
         std.debug.assert(parser.stack_depth <= MAX_BLOCK_NESTING);
         if (parser.stack_depth > 0) parser.stack_depth -= 1;
     }
@@ -232,7 +261,8 @@ pub const OctomarkParser = struct {
     }
 
     fn renderAndCloseTopBlock(parser: *OctomarkParser, output: anytype) !void {
-        parser.countCall(.renderAndCloseTopBlock);
+        const _s = parser.startCall(.renderAndCloseTopBlock);
+        defer parser.endCall(.renderAndCloseTopBlock, _s);
         if (parser.stack_depth == 0) return;
         const block_type = parser.block_stack[parser.stack_depth - 1].block_type;
         parser.popBlock();
@@ -249,7 +279,8 @@ pub const OctomarkParser = struct {
     }
 
     fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: anytype) !void {
-        @constCast(parser).countCall(.appendEscapedText);
+        const _s = @constCast(parser).startCall(.appendEscapedText);
+        defer @constCast(parser).endCall(.appendEscapedText, _s);
         var i: usize = 0;
         while (i < text.len) : (i += 1) {
             const entity = html_escape_map[text[i]];
@@ -262,7 +293,8 @@ pub const OctomarkParser = struct {
     }
 
     fn findNextSpecial(parser: *OctomarkParser, text: []const u8, start: usize) usize {
-        parser.countCall(.findNextSpecial);
+        const _s = parser.startCall(.findNextSpecial);
+        defer parser.endCall(.findNextSpecial, _s);
         if (start >= text.len) return text.len;
         if (std.mem.indexOfAny(u8, text[start..], special_chars)) |offset| {
             return start + offset;
@@ -275,7 +307,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseInlineContentDepth(parser: *OctomarkParser, text: []const u8, output: anytype, depth: usize) !void {
-        parser.countCall(.parseInlineContent);
+        const _s = parser.startCall(.parseInlineContent);
+        defer parser.endCall(.parseInlineContent, _s);
         var i: usize = 0;
         while (i < text.len) {
             const start = i;
@@ -575,7 +608,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
-        parser.countCall(.parseFencedCodeBlock);
+        const _s = parser.startCall(.parseFencedCodeBlock);
+        defer parser.endCall(.parseFencedCodeBlock, _s);
         var content = line_content;
         var extra_spaces: usize = 0;
         while (content.len > 0 and content[0] == ' ') {
@@ -610,7 +644,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseMathBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
-        parser.countCall(.parseMathBlock);
+        const _s = parser.startCall(.parseMathBlock);
+        defer parser.endCall(.parseMathBlock, _s);
         var content = line_content;
         var extra_spaces: usize = 0;
         while (content.len > 0 and content[0] == ' ') {
@@ -646,7 +681,7 @@ pub const OctomarkParser = struct {
     }
 
     fn parseHeader(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        parser.countCall(.parseHeader);
+        const _s = parser.startCall(.parseHeader); defer parser.endCall(.parseHeader, _s);
         if (line_content.len >= 1 and line_content[0] == '#') {
             var level: usize = 0;
             while (level < 6 and level < line_content.len and line_content[level] == '#') : (level += 1) {}
@@ -677,7 +712,7 @@ pub const OctomarkParser = struct {
     }
 
     fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        parser.countCall(.parseHorizontalRule);
+        const _s = parser.startCall(.parseHorizontalRule); defer parser.endCall(.parseHorizontalRule, _s);
         if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
             try parser.tryCloseLeafBlock(output);
             try writeAll(output, "<hr>\n");
@@ -687,7 +722,7 @@ pub const OctomarkParser = struct {
     }
 
     fn parseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
-        parser.countCall(.parseDefinitionList);
+        const _s = parser.startCall(.parseDefinitionList); defer parser.endCall(.parseDefinitionList, _s);
         var line = line_content.*;
         if (line.len > 0 and line[0] == ':') {
             var consumed: usize = 1;
@@ -722,7 +757,7 @@ pub const OctomarkParser = struct {
     }
 
     fn parseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
-        parser.countCall(.parseListItem);
+        const _s = parser.startCall(.parseListItem); defer parser.endCall(.parseListItem, _s);
         var line = line_content.*;
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
         const internal_spaces: usize = line.len - trimmed_line.len;
@@ -788,7 +823,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
-        parser.countCall(.parseTable);
+        const _s = parser.startCall(.parseTable);
+        defer parser.endCall(.parseTable, _s);
         // 1. If we are already IN a table, process body rows strictly.
         if (parser.currentBlockType() == .table) {
             const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
@@ -870,7 +906,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
-        parser.countCall(.parseDefinitionTerm);
+        const _s = parser.startCall(.parseDefinitionTerm);
+        defer parser.endCall(.parseDefinitionTerm, _s);
         if (current_pos < full_data.len) {
             const next_newline = std.mem.indexOfScalar(u8, full_data[current_pos..], '\n');
             if (next_newline) |offset| {
@@ -919,7 +956,8 @@ pub const OctomarkParser = struct {
     }
 
     fn processSingleLine(parser: *OctomarkParser, line: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
-        parser.countCall(.processSingleLine);
+        const _s = parser.startCall(.processSingleLine);
+        defer parser.endCall(.processSingleLine, _s);
         if (try parser.processLeafBlockContinuation(line, output)) return false;
 
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
@@ -1038,7 +1076,8 @@ pub const OctomarkParser = struct {
     }
 
     fn isNextLineTableSeparator(parser: *OctomarkParser, full_data: []const u8, start_pos: usize) bool {
-        parser.countCall(.isNextLineTableSeparator);
+        const _s = parser.startCall(.isNextLineTableSeparator);
+        defer parser.endCall(.isNextLineTableSeparator, _s);
         if (start_pos >= full_data.len) return true; // Treat EOF as buffering safe (incomplete input)
 
         const next_line_end = if (std.mem.indexOfScalar(u8, full_data[start_pos..], '\n')) |nl|
@@ -1067,7 +1106,7 @@ pub const OctomarkParser = struct {
     }
 
     fn parseHtmlTag(parser: *OctomarkParser, text: []const u8) usize {
-        parser.countCall(.parseHtmlTag);
+        const _s = parser.startCall(.parseHtmlTag); defer parser.endCall(.parseHtmlTag, _s);
         const len = text.len;
         if (len < 3 or text[0] != '<') return 0;
 
@@ -1126,7 +1165,7 @@ pub const OctomarkParser = struct {
     }
 
     fn splitTableRowCells(parser: *OctomarkParser, str: []const u8, cells: *[64][]const u8) usize {
-        parser.countCall(.splitTableRowCells);
+        const _s = parser.startCall(.splitTableRowCells); defer parser.endCall(.splitTableRowCells, _s);
         var count: usize = 0;
         var cursor = std.mem.trim(u8, str, &std.ascii.whitespace);
         if (cursor.len > 0 and cursor[0] == '|') cursor = cursor[1..];
@@ -1161,7 +1200,8 @@ pub const OctomarkParser = struct {
     }
 
     fn isBlockStartMarker(parser: *OctomarkParser, str: []const u8) bool {
-        parser.countCall(.isBlockStartMarker);
+        const _s = parser.startCall(.isBlockStartMarker);
+        defer parser.endCall(.isBlockStartMarker, _s);
         if (str.len >= 3 and std.mem.eql(u8, str[0..3], "```")) return true;
         if (str.len >= 2 and std.mem.eql(u8, str[0..2], "$$")) return true;
         if (str.len >= 1 and (str[0] == '#' or str[0] == ':')) return true;
