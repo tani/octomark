@@ -78,7 +78,7 @@ pub const OctomarkParser = struct {
     pub fn parse(self: *OctomarkParser, reader: anytype, writer: anytype, allocator: std.mem.Allocator) !void {
         var buffer: [4096]u8 = undefined;
         while (true) {
-            const n = try reader.readSliceShort(&buffer);
+            const n = try reader.read(&buffer);
             if (n == 0) break;
             try self.feed(buffer[0..n], writer, allocator);
         }
@@ -478,7 +478,8 @@ pub const OctomarkParser = struct {
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
         const internal_spaces: usize = line.len - trimmed_line.len;
 
-        const is_ul = (line.len - internal_spaces >= 2 and std.mem.eql(u8, line[internal_spaces .. internal_spaces + 2], "- "));
+        const is_ul = (line.len - internal_spaces >= 2 and (std.mem.eql(u8, line[internal_spaces .. internal_spaces + 2], "- ") or
+            std.mem.eql(u8, line[internal_spaces .. internal_spaces + 2], "* ")));
         const is_ol = (line.len - internal_spaces >= 3 and std.ascii.isDigit(line[internal_spaces]) and
             std.mem.eql(u8, line[internal_spaces + 1 .. internal_spaces + 3], ". "));
 
@@ -841,7 +842,7 @@ fn isBlockStartMarker(str: []const u8) bool {
     if (str.len >= 3 and std.mem.eql(u8, str[0..3], "```")) return true;
     if (str.len >= 2 and std.mem.eql(u8, str[0..2], "$$")) return true;
     if (str.len >= 1 and (str[0] == '#' or str[0] == ':')) return true;
-    if (str.len >= 2 and std.mem.eql(u8, str[0..2], "- ")) return true;
+    if (str.len >= 2 and (std.mem.eql(u8, str[0..2], "- ") or std.mem.eql(u8, str[0..2], "* "))) return true;
     if (str.len >= 3 and std.ascii.isDigit(str[0]) and std.mem.eql(u8, str[1..3], ". ")) return true;
     if (str.len >= 3 and (std.mem.eql(u8, str[0..3], "---") or std.mem.eql(u8, str[0..3], "***") or std.mem.eql(u8, str[0..3], "___"))) return true;
     return false;

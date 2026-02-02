@@ -18,16 +18,15 @@ fn render(allocator: std.mem.Allocator, input: []const u8, enable_html: bool) ![
     defer parser.deinit(allocator);
     parser.setOptions(.{ .enable_html = enable_html });
 
-    var reader = std.io.Reader.fixed(input);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input);
+    const reader = fbs.reader();
+    var list = std.ArrayList(u8).init(allocator);
+    errdefer list.deinit();
+    const writer = list.writer();
 
-    try parser.parse(&reader, &writer_alloc.writer, allocator);
+    try parser.parse(&reader, writer, allocator);
 
-    const result = writer_alloc.writer.buffered();
-    const final = try allocator.alloc(u8, result.len);
-    @memcpy(final, result);
-    return final;
+    return list.toOwnedSlice();
 }
 
 test "octomark cases" {
@@ -74,6 +73,8 @@ test "octomark cases" {
         tc("Emphasis Fallback", "_No Closing", "<p>_No Closing</p>\n", false),
         tc("Single backtick", "`code`", "<p><code>code</code></p>\n", false),
         tc("Backtick with content", "`code ` text`", "<p><code>code </code> text`</p>\n", false),
+        tc("Unordered List with Asterisk", "* Item 1\n* Item 2", "<ul>\n<li>Item 1</li>\n<li>Item 2</li>\n</ul>\n", false),
+        tc("Horizontal Rule with Asterisks", "***", "<hr>\n", false),
     };
 
     const allocator = std.testing.allocator;
@@ -98,11 +99,13 @@ test "NestingTooDeep" {
     }
     try input.appendSlice(allocator, "Deep");
 
-    var reader = std.io.Reader.fixed(input.items);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input.items);
+    const reader = fbs.reader();
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+    const writer = list.writer();
 
-    const result = parser.parse(&reader, &writer_alloc.writer, allocator);
+    const result = parser.parse(&reader, writer, allocator);
     try std.testing.expectError(error.NestingTooDeep, result);
 }
 
