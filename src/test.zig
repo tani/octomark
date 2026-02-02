@@ -45,7 +45,7 @@ test "compliance reproduction cases" {
     try parser.init(allocator);
     parser.setOptions(.{ .enable_html = true });
 
-    // 3. Entity in Attributes (Example 32)
-    // [foo](/f&ouml;&ouml; "f&ouml;&ouml;") -> <p><a href="/f%C3%B6%C3%B6" title="föö">foo</a></p>
-    try verifyRender(&parser, "[foo](/f&ouml;&ouml; \"f&ouml;&ouml;\")", "<p><a href=\"/f%C3%B6%C3%B6\" title=\"föö\">foo</a></p>\n");
+    // 4. Emphasis Flanking Rules (Example 378)
+    // _foo_bar_baz_ -> <p><em>foo_bar_baz</em></p>
+    try verifyRender(&parser, "_foo_bar_baz_", "<p><em>foo_bar_baz</em></p>\n");
 }
