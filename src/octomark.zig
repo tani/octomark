@@ -4,10 +4,10 @@ const builtin = @import("builtin");
 const MAX_BLOCK_NESTING = 32;
 const MAX_INLINE_NESTING = 32;
 
-const BlockType = enum(u8) { unordered_list, ordered_list, blockquote, definition_list, definition_description, code, indented_code, math, table, paragraph };
-const block_close_tags = [_][]const u8{ "</li>\n</ul>\n", "</li>\n</ol>\n", "</blockquote>\n", "</dl>\n", "</dd>\n", "</code></pre>\n", "</code></pre>\n", "</div>\n", "</tbody></table>\n", "</p>\n" };
+const BlockType = enum(u8) { unordered_list, ordered_list, blockquote, definition_list, definition_description, code, indented_code, math, table, html_block, paragraph };
+const block_close_tags = [_][]const u8{ "</li>\n</ul>\n", "</li>\n</ol>\n", "</blockquote>\n", "</dl>\n", "</dd>\n", "</code></pre>\n", "</code></pre>\n", "</div>\n", "</tbody></table>\n", "", "</p>\n" };
 const TableAlignment = enum { none, left, center, right };
-const BlockEntry = struct { block_type: BlockType, indent_level: i32, content_indent: i32, loose: bool };
+const BlockEntry = struct { block_type: BlockType, indent_level: i32, content_indent: i32, loose: bool, extra_type: u8 = 0 };
 const Buffer = std.ArrayListUnmanaged(u8);
 const AllocError = std.mem.Allocator.Error;
 const ParseError = AllocError || std.fs.File.WriteError || error{ NestingTooDeep, TooManyTableColumns };
@@ -176,6 +176,11 @@ pub const OctomarkParser = struct {
         const W = if (@typeInfo(@TypeOf(writer)) == .pointer) std.meta.Child(@TypeOf(writer)) else @TypeOf(writer);
         if (comptime @hasField(W, "interface")) try writer.interface.writeByte(byte) else try writer.writeByte(byte);
     }
+    inline fn writeHex(writer: anytype, byte: u8) !void {
+        const hex = "0123456789ABCDEF";
+        try writeByte(writer, hex[byte >> 4]);
+        try writeByte(writer, hex[byte & 0xF]);
+    }
 
     /// Feed a chunk into the parser. Returns error.OutOfMemory or writer errors.
     pub fn feed(self: *OctomarkParser, chunk: []const u8, output: anytype, allocator: std.mem.Allocator) !void {
@@ -224,8 +229,11 @@ pub const OctomarkParser = struct {
     }
 
     fn pushBlock(p: *OctomarkParser, t: BlockType, i: i32) !void {
+        try p.pushBlockExtra(t, i, 0);
+    }
+    fn pushBlockExtra(p: *OctomarkParser, t: BlockType, i: i32, extra: u8) !void {
         if (p.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
-        p.block_stack[p.stack_depth] = .{ .block_type = t, .indent_level = i, .content_indent = i, .loose = false };
+        p.block_stack[p.stack_depth] = .{ .block_type = t, .indent_level = i, .content_indent = i, .loose = false, .extra_type = extra };
         p.stack_depth += 1;
     }
     fn pop(p: *OctomarkParser) void {
@@ -297,6 +305,56 @@ pub const OctomarkParser = struct {
         const s = p.startCall(.findSpec);
         defer p.endCall(.findSpec, s);
         return if (std.mem.indexOfAny(u8, text[start..], special_chars)) |off| start + off else text.len;
+    }
+
+    fn decodeEntity(text: []const u8, out_buf: *[4]u8) struct { consumed: usize, len: usize } {
+        if (text.len < 2 or text[0] != '&') return .{ .consumed = 0, .len = 0 };
+        var j: usize = 1;
+        var decoded_len: usize = 0;
+        if (j < text.len and text[j] == '#') {
+            j += 1;
+            const b: u8 = if (j < text.len and (text[j] | 32) == 'x') blk: {
+                j += 1;
+                break :blk 16;
+            } else 10;
+            const cp_s = j;
+            while (j < text.len and (if (b == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1) {}
+            if (j > cp_s and j < text.len and text[j] == ';') {
+                var cp = std.fmt.parseInt(u21, text[cp_s..j], b) catch 0;
+                if (cp == 0) cp = 0xFFFD;
+                if (cp > 0) decoded_len = std.unicode.utf8Encode(@intCast(cp), out_buf) catch 0;
+                if (decoded_len > 0) j += 1 else j = 1; // Success implies consume ;
+            } else j = 1;
+        } else {
+            while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
+            if (j > 1 and j < text.len and text[j] == ';') {
+                const en = text[1..j];
+                const d: ?[]const u8 = switch (en.len) {
+                    2 => if (std.mem.eql(u8, en, "lt")) "<" else if (std.mem.eql(u8, en, "gt")) ">" else null,
+                    3 => if (std.mem.eql(u8, en, "amp")) "&" else null,
+                    4 => if (std.mem.eql(u8, en, "quot")) "\"" else if (std.mem.eql(u8, en, "apos")) "'" else if (std.mem.eql(u8, en, "copy")) "©" else if (std.mem.eql(u8, en, "nbsp")) "\u{00A0}" else if (std.mem.eql(u8, en, "ouml")) "\u{00F6}" else null,
+                    5 => if (std.mem.eql(u8, en, "ndash")) "–" else if (std.mem.eql(u8, en, "mdash")) "—" else if (std.mem.eql(u8, en, "AElig")) "\u{00C6}" else null,
+                    else => null,
+                };
+                if (d) |v| {
+                    if (v.len <= 4) {
+                        @memcpy(out_buf[0..v.len], v);
+                        decoded_len = v.len;
+                        j += 1;
+                    } else j = 1;
+                } else j = 1;
+            } else j = 1;
+        }
+        if (decoded_len == 0) return .{ .consumed = 0, .len = 0 };
+        return .{ .consumed = j, .len = decoded_len };
+    }
+
+    fn needsPercentEncode(c: u8) bool {
+        if (std.ascii.isAlphanumeric(c)) return false;
+        return switch (c) {
+            '-', '.', '_', '~', '!', '$', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?' => false,
+            else => true,
+        };
     }
     pub fn parseInlineContent(p: *OctomarkParser, text: []const u8, o: anytype) !void {
         p.replacements.clearRetainingCapacity();
@@ -540,20 +598,63 @@ pub const OctomarkParser = struct {
                                     } else {
                                         try writeAll(o, if (img) "<img src=\"" else "<a href=\"");
                                         var u: usize = 0;
-                                        while (u < url.len) : (u += 1) {
+                                        while (u < url.len) {
+                                            if (url[u] == '&') {
+                                                var db: [4]u8 = undefined;
+                                                const dr = decodeEntity(url[u..], &db);
+                                                if (dr.len > 0) {
+                                                    for (db[0..dr.len]) |b| {
+                                                        if (needsPercentEncode(b)) {
+                                                            try writeByte(o, '%');
+                                                            try writeHex(o, b);
+                                                        } else if (html_escape_map[b]) |e| {
+                                                            try writeAll(o, e);
+                                                        } else try writeByte(o, b);
+                                                    }
+                                                    u += dr.consumed;
+                                                    continue;
+                                                }
+                                            }
                                             var ch = url[u];
                                             if (ch == '\\' and u + 1 < url.len and isAsciiPunct(url[u + 1])) {
                                                 u += 1;
                                                 ch = url[u];
                                             }
-                                            if (ch == '\\') try writeAll(o, "%5C") else if (html_escape_map[ch]) |e| {
+                                            if (needsPercentEncode(ch)) {
+                                                if (ch == '%') {
+                                                    // If % is followed by 2 hex digits, preserve it
+                                                    if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and std.ascii.isHex(url[u + 2])) {
+                                                        try writeByte(o, ch);
+                                                    } else try writeAll(o, "%25");
+                                                } else {
+                                                    try writeByte(o, '%');
+                                                    try writeHex(o, ch);
+                                                }
+                                            } else if (html_escape_map[ch]) |e| {
                                                 try writeAll(o, e);
                                             } else try writeByte(o, ch);
+                                            u += 1;
                                         }
                                         try writeByte(o, '"');
                                         if (tit) |t| {
                                             try writeAll(o, " title=\"");
-                                            try p.esc(t, o);
+                                            var ti: usize = 0;
+                                            while (ti < t.len) {
+                                                if (t[ti] == '&') {
+                                                    var db: [4]u8 = undefined;
+                                                    const dr = decodeEntity(t[ti..], &db);
+                                                    if (dr.len > 0) {
+                                                        try p.esc(db[0..dr.len], o);
+                                                        ti += dr.consumed;
+                                                        continue;
+                                                    }
+                                                }
+                                                if (t[ti] == '\\' and ti + 1 < t.len and isAsciiPunct(t[ti + 1])) {
+                                                    ti += 1;
+                                                }
+                                                if (html_escape_map[t[ti]]) |e| try writeAll(o, e) else try writeByte(o, t[ti]);
+                                                ti += 1;
+                                            }
                                             try writeByte(o, '"');
                                         }
                                         if (img) {
@@ -644,45 +745,13 @@ pub const OctomarkParser = struct {
                     }
                 },
                 '&' => {
-                    var j = i + 1;
-                    var decoded: [4]u8 = undefined;
-                    var decoded_len: usize = 0;
-                    if (j < text.len and text[j] == '#') {
-                        j += 1;
-                        const b: u8 = if (j < text.len and (text[j] | 32) == 'x') blk: {
-                            j += 1;
-                            break :blk 16;
-                        } else 10;
-                        const cp_s = j;
-                        while (j < text.len and (if (b == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1) {}
-                        if (j > cp_s and j < text.len and text[j] == ';') {
-                            const cp = std.fmt.parseInt(u21, text[cp_s..j], b) catch 0;
-                            if (cp > 0) decoded_len = std.unicode.utf8Encode(@intCast(cp), &decoded) catch 0;
-                            if (decoded_len > 0) {
-                                try p.esc(decoded[0..decoded_len], o);
-                                i = j + 1;
-                                h = true;
-                            }
-                        }
+                    var db: [4]u8 = undefined;
+                    const dr = decodeEntity(text[i..], &db);
+                    if (dr.len > 0) {
+                        try p.esc(db[0..dr.len], o);
+                        i += dr.consumed;
+                        h = true;
                     } else {
-                        while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
-                        if (j > i + 1 and j < text.len and text[j] == ';') {
-                            const en = text[i + 1 .. j];
-                            const d: ?[]const u8 = switch (en.len) {
-                                2 => if (std.mem.eql(u8, en, "lt")) "<" else if (std.mem.eql(u8, en, "gt")) ">" else null,
-                                3 => if (std.mem.eql(u8, en, "amp")) "&" else null,
-                                4 => if (std.mem.eql(u8, en, "quot")) "\"" else if (std.mem.eql(u8, en, "apos")) "'" else if (std.mem.eql(u8, en, "copy")) "©" else if (std.mem.eql(u8, en, "nbsp")) "\u{00A0}" else null,
-                                5 => if (std.mem.eql(u8, en, "ndash")) "–" else if (std.mem.eql(u8, en, "mdash")) "—" else null,
-                                else => null,
-                            };
-                            if (d) |v| {
-                                try p.esc(v, o);
-                                i = j + 1;
-                                h = true;
-                            }
-                        }
-                    }
-                    if (!h) {
                         try writeAll(o, "&amp;");
                         i += 1;
                         h = true;
@@ -743,6 +812,47 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.processLeafBlockContinuation, _s);
 
         const top = parser.topT() orelse return false;
+        if (top == .html_block) {
+            const h_type = parser.block_stack[parser.stack_depth - 1].extra_type;
+            if (h_type >= 6) {
+                if (std.mem.trim(u8, line, " \t").len == 0) {
+                    try parser.renderTop(output);
+                    return false;
+                }
+            }
+            try writeAll(output, line);
+            try writeByte(output, '\n');
+            if (h_type <= 5) {
+                var term = false;
+                if (h_type == 1) {
+                    const tags = [_][]const u8{ "</script>", "</pre>", "</style>" };
+                    var i: usize = 0;
+                    while (i + 8 < line.len) : (i += 1) {
+                        if (line[i] == '<' and line[i + 1] == '/') {
+                            for (tags) |tag| {
+                                if (i + tag.len <= line.len) {
+                                    if (std.ascii.eqlIgnoreCase(line[i .. i + tag.len], tag)) {
+                                        term = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (term) break;
+                    }
+                } else if (h_type == 2) {
+                    if (std.mem.indexOf(u8, line, "-->") != null) term = true;
+                } else if (h_type == 3) {
+                    if (std.mem.indexOf(u8, line, "?>") != null) term = true;
+                } else if (h_type == 4) {
+                    if (std.mem.indexOf(u8, line, ">") != null) term = true;
+                } else if (h_type == 5) {
+                    if (std.mem.indexOf(u8, line, "]]>") != null) term = true;
+                }
+                if (term) try parser.renderTop(output);
+            }
+            return true;
+        }
         if (top != .code and top != .math and top != .indented_code) return false;
 
         var text_slice = line;
@@ -1553,9 +1663,37 @@ pub const OctomarkParser = struct {
                     }
                     if (h_t > 0) {
                         try p.renderTop(o);
+                        try p.pushBlockExtra(.html_block, 0, h_t);
                         try writeAll(o, lc);
                         try writeByte(o, '\n');
-                        return true;
+                        var term = false;
+                        if (h_t == 1) {
+                            const tags = [_][]const u8{ "</script>", "</pre>", "</style>" };
+                            var i: usize = 0;
+                            while (i + 8 < lc.len) : (i += 1) {
+                                if (lc[i] == '<' and lc[i + 1] == '/') {
+                                    for (tags) |tag| {
+                                        if (i + tag.len <= lc.len) {
+                                            if (std.ascii.eqlIgnoreCase(lc[i .. i + tag.len], tag)) {
+                                                term = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (term) break;
+                            }
+                        } else if (h_t == 2) {
+                            if (std.mem.indexOf(u8, lc, "-->") != null) term = true;
+                        } else if (h_t == 3) {
+                            if (std.mem.indexOf(u8, lc, "?>") != null) term = true;
+                        } else if (h_t == 4) {
+                            if (std.mem.indexOf(u8, lc, ">") != null) term = true;
+                        } else if (h_t == 5) {
+                            if (std.mem.indexOf(u8, lc, "]]>") != null) term = true;
+                        }
+                        if (term) try p.renderTop(o);
+                        return false;
                     }
                 },
                 else => {},

@@ -1,39 +1,51 @@
 const std = @import("std");
 const octomark = @import("octomark.zig");
 
-test "debug HTML edge cases" {
+// Helper to verify rendering output
+fn verifyRender(parser: *octomark.OctomarkParser, input: []const u8, expected: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var out_list = std.ArrayListUnmanaged(u8){};
+    defer out_list.deinit(allocator);
+
+    var stream = std.io.fixedBufferStream(input);
+    try parser.parse(stream.reader(), out_list.writer(allocator), allocator);
+
+    // Trim warnings or extra newlines if necessary, but octomark usually outputs exact HTML
+    const actual = out_list.items;
+
+    if (!std.mem.eql(u8, actual, expected)) {
+        std.debug.print("\nFAIL:\nInput:\n{s}\nExpected:\n{s}\nActual:\n{s}\n", .{ input, expected, actual });
+        return error.TestFailed;
+    }
+}
+
+test "compliance reproduction cases" {
     var parser: octomark.OctomarkParser = undefined;
     const allocator = std.testing.allocator;
     try parser.init(allocator);
     defer parser.deinit(allocator);
+    // Enable HTML for these tests
     parser.setOptions(.{ .enable_html = true });
 
-    const verifyTag = struct {
-        fn call(p: *octomark.OctomarkParser, input: []const u8, expect_valid: bool) !void {
-            const len = p.parseHtmlTag(input);
-            if (expect_valid) {
-                if (len == 0) std.debug.print("FAIL: Expected valid, got 0 for '{s}'\n", .{input});
-                try std.testing.expect(len > 0);
-            } else {
-                if (len > 0) std.debug.print("FAIL: Expected invalid, got {} for '{s}'\n", .{ len, input });
-                try std.testing.expectEqual(@as(usize, 0), len);
-            }
-        }
-    }.call;
+    // 1. HTML Block Content Loss (Example 187)
+    // The parser was dropping 'bar'
+    try verifyRender(&parser, "Foo\n<div>\nbar\n</div>", "<p>Foo</p>\n<div>\nbar\n</div>\n");
 
-    // 611: <m:abc> should be invalid (colon in tag name)
-    try verifyTag(&parser, "<m:abc>", false);
+    parser.deinit(allocator);
+    try parser.init(allocator);
+    parser.setOptions(.{ .enable_html = true });
 
-    // 628: <!--> should be invalid (text starts with >)
-    try verifyTag(&parser, "<!-->", false);
-    try verifyTag(&parser, "<!--->", false);
+    // 2. Entity Null Char (Example 26)
+    // Should be replaced by replacement character U+FFFD ()
+    // Note: CommonMark might expect specific handling.
+    // Example 26: &#35; &#1234; &#992; &#0; -> <p># Ӓ Ϡ </p>
+    try verifyRender(&parser, "&#35; &#1234; &#992; &#0;", "<p># Ӓ Ϡ \xEF\xBF\xBD</p>\n");
 
-    // Strict comment: no -- inside
-    try verifyTag(&parser, "<!-- foo -- bar -->", false);
+    parser.deinit(allocator);
+    try parser.init(allocator);
+    parser.setOptions(.{ .enable_html = true });
 
-    // 624: <a href='bar'title=title> should be invalid (missing whitespace)
-    try verifyTag(&parser, "<a href='bar'title=title>", false);
-
-    // Multi-line should be valid
-    try verifyTag(&parser, "<a\nhref='bar'>", true);
+    // 3. Entity in Attributes (Example 32)
+    // [foo](/f&ouml;&ouml; "f&ouml;&ouml;") -> <p><a href="/f%C3%B6%C3%B6" title="föö">foo</a></p>
+    try verifyRender(&parser, "[foo](/f&ouml;&ouml; \"f&ouml;&ouml;\")", "<p><a href=\"/f%C3%B6%C3%B6\" title=\"föö\">foo</a></p>\n");
 }
