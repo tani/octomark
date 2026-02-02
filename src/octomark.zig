@@ -116,6 +116,24 @@ fn stripIndentColumns(line: []const u8, columns: usize) []const u8 {
     return line[idx..];
 }
 
+fn isThematicBreakLine(line: []const u8) bool {
+    var marker: u8 = 0;
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const c = line[i];
+        if (c == ' ' or c == '\t') continue;
+        if (c != '*' and c != '-' and c != '_') return false;
+        if (marker == 0) {
+            marker = c;
+        } else if (c != marker) {
+            return false;
+        }
+        count += 1;
+    }
+    return count >= 3;
+}
+
 
 pub const OctomarkParser = struct {
     table_alignments: [64]TableAlignment = [_]TableAlignment{TableAlignment.none} ** 64,
@@ -1070,30 +1088,38 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseHeader(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
+    fn parseHeader(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
         const _s = parser.startCall(.parseHeader);
         defer parser.endCall(.parseHeader, _s);
+        if (leading_spaces > 3) return false;
         if (line_content.len >= 1 and line_content[0] == '#') {
             var level: usize = 0;
             while (level < 6 and level < line_content.len and line_content[level] == '#') : (level += 1) {}
 
-            // Handle up to 6 levels of hashes (CommonMark limitation)
-            if (level == 6 and level < line_content.len and line_content[level] == '#') return false;
+            if (level == 0 or level > 6) return false;
+            if (level < line_content.len and line_content[level] != ' ' and line_content[level] != '\t') return false;
 
-            var real_level: usize = 0;
-            while (real_level < line_content.len and line_content[real_level] == '#') : (real_level += 1) {}
+            var content_start: usize = level;
+            while (content_start < line_content.len and (line_content[content_start] == ' ' or line_content[content_start] == '\t')) : (content_start += 1) {}
 
-            if (real_level > 6 or real_level == 0) return false;
-
-            level = real_level;
-            const content_start: usize = if (level < line_content.len and line_content[level] == ' ') level + 1 else level;
+            var end = line_content.len;
+            while (end > content_start and (line_content[end - 1] == ' ' or line_content[end - 1] == '\t')) : (end -= 1) {}
+            if (end > content_start) {
+                var hash_end = end;
+                while (hash_end > content_start and line_content[hash_end - 1] == '#') : (hash_end -= 1) {}
+                if (hash_end < end) {
+                    var space_end = hash_end;
+                    while (space_end > content_start and (line_content[space_end - 1] == ' ' or line_content[space_end - 1] == '\t')) : (space_end -= 1) {}
+                    if (space_end < hash_end) end = space_end;
+                }
+            }
 
             try parser.tryCloseLeafBlock(output);
             const level_char: u8 = '0' + @as(u8, @intCast(level));
             try writeAll(output, "<h");
             try writeByte(output, level_char);
             try writeAll(output, ">");
-            try parser.parseInlineContent(line_content[content_start..], output);
+            try parser.parseInlineContent(line_content[content_start..end], output);
             try writeAll(output, "</h");
             try writeByte(output, level_char);
             try writeAll(output, ">\n");
@@ -1105,7 +1131,7 @@ pub const OctomarkParser = struct {
     fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
         const _s = parser.startCall(.parseHorizontalRule);
         defer parser.endCall(.parseHorizontalRule, _s);
-        if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
+        if (isThematicBreakLine(line_content)) {
             try parser.tryCloseLeafBlock(output);
             try writeAll(output, "<hr>\n");
             return true;
@@ -1154,6 +1180,7 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.parseListItem, _s);
         var line = line_content.*;
         if (line.len == 0) return false;
+        if (isThematicBreakLine(line)) return false;
 
         const trimmed_line = std.mem.trimLeft(u8, line, " ");
         const internal_spaces = line.len - trimmed_line.len;
@@ -1424,7 +1451,7 @@ pub const OctomarkParser = struct {
 
         if (line_content.len > 0) {
             switch (line_content[0]) {
-                '#' => if (try parser.parseHeader(line_content, output)) return false,
+                '#' => if (try parser.parseHeader(line_content, leading_spaces, output)) return false,
                 '`', '~' => if (try parser.parseFencedCodeBlock(line_content, leading_spaces, output)) return false,
                 '$' => if (try parser.parseMathBlock(line_content, leading_spaces, output)) return false,
                 '-' => {
@@ -1662,13 +1689,13 @@ pub const OctomarkParser = struct {
         const _s = parser.startCall(.isBlockStartMarker);
         defer parser.endCall(.isBlockStartMarker, _s);
         if (str.len == 0) return false;
+        if (isThematicBreakLine(str)) return true;
         switch (str[0]) {
             '`' => return str.len >= 3 and std.mem.startsWith(u8, str, "```"),
             '$' => return str.len >= 2 and std.mem.startsWith(u8, str, "$$"),
             '#', '.', ':', '<', '|' => return true,
-            '-' => return str.len >= 2 and (str[1] == ' ' or (str.len >= 3 and std.mem.startsWith(u8, str, "---"))),
-            '*' => return str.len >= 3 and std.mem.startsWith(u8, str, "***"),
-            '_' => return str.len >= 3 and std.mem.startsWith(u8, str, "___"),
+            '-' => return str.len >= 2 and (str[1] == ' ' or str[1] == '\t'),
+            '*', '_' => return str.len >= 2 and (str[1] == ' ' or str[1] == '\t'),
             '0'...'9' => return str.len >= 3 and std.mem.eql(u8, str[1..3], ". "),
             else => return false,
         }

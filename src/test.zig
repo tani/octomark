@@ -35,7 +35,11 @@ test "octomark cases" {
         tc("Simple Paragraph", "Hello, OctoMark!", "<p>Hello, OctoMark!</p>\n", false),
         tc("Heading1", "# Welcome", "<h1>Welcome</h1>\n", false),
         tc("Heading2", "## Subtitle", "<h2>Subtitle</h2>\n", false),
+        tc("Heading Trailing Hashes", "## Title ##", "<h2>Title</h2>\n", false),
         tc("Horizontal Rule", "---", "<hr>\n", false),
+        tc("Horizontal Rule Spaced", "- - -", "<hr>\n", false),
+        tc("Horizontal Rule Tabs", "\t*\t*\t*", "<hr>\n", false),
+        tc("Horizontal Rule Mixed Fail", "- * -", "<ul>\n<li>* -</li>\n</ul>\n", false),
         tc("Strong Style", "**Bold**", "<p><strong>Bold</strong></p>\n", false),
         tc("Emphasis Style", "_Italic_", "<p><em>Italic</em></p>\n", false),
         tc("Inline Code", "`code`", "<p><code>code</code></p>\n", false),
@@ -114,7 +118,7 @@ test "NestingTooDeep" {
 
 test "mandatory fixes" {
     const cases = [_]TestCase{
-        tc("2.1 ATX No Space", "#Header", "<h1>Header</h1>\n", false),
+        tc("2.1 ATX No Space", "#Header", "<p>#Header</p>\n", false),
         tc("2.1 ATX Empty", "#", "<h1></h1>\n", false),
         tc("2.2 List Star", "* A", "<ul>\n<li>A</li>\n</ul>\n", false),
         tc("2.2 List Plus", "+ A", "<ul>\n<li>A</li>\n</ul>\n", false),
@@ -146,7 +150,7 @@ test "comprehensive cases" {
         tc("Header 5", "##### H5", "<h5>H5</h5>\n", false),
         tc("Header 6", "###### H6", "<h6>H6</h6>\n", false),
         tc("Invalid Header 7", "####### H7", "<p>####### H7</p>\n", false),
-        tc("Invalid Header No Space", "#Header", "<h1>Header</h1>\n", false),
+        tc("Invalid Header No Space", "#Header", "<p>#Header</p>\n", false),
         tc("Header with Bold", "# **Bold**", "<h1><strong>Bold</strong></h1>\n", false),
         tc("Header with Code", "## `Code`", "<h2><code>Code</code></h2>\n", false),
         tc("Header with Link", "### [Link](url)", "<h3><a href=\"url\">Link</a></h3>\n", false),

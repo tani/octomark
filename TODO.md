@@ -1,5 +1,5 @@
 - [x] Tabs/indentation: implement CommonMark tab expansion (4-space stops) during line scan; keep a single pass over each line.
-- [ ] Thematic breaks & headings: tighten rules for ATX/Setext and thematic breaks (indent limits, trailing hash trimming, thematic break vs list item) with linear scans only.
+- [x] Thematic breaks & headings: tighten rules for ATX/Setext and thematic breaks (indent limits, trailing hash trimming, thematic break vs list item) with linear scans only.
 - [ ] Backslash escapes: treat only punctuation escapes; otherwise emit backslash literally; still a single pass over inline text.
 - [ ] Entity decoding: support numeric entities (decimal/hex) and a small fixed table for named entities in O(1) lookups; avoid regex.
 - [ ] Link/image parsing: implement reference definitions (collect in one pass) and reference link resolution; parse destinations/titles with bounded linear scans.
