@@ -16,6 +16,7 @@ This skill focuses on the absolute minimization of the Octomark codebase. **Tota
 5. **Strictly `std` Only**: Any custom utility that can be replaced by a `std` call (even a slightly slower or more complex one) must be deleted.
 6. **No Private Abstractions**: Structs, enums, and helper functions are bloat. Flatten them, inline them, or remove them.
 7. **Delete Everything Non-Essential**: If it isn't required to pass the core tests, it is gone. This includes options, complex error handling, and "just in case" state.
+8. Do not remove Stats and Timer code.
 
 ## Tactics
 
