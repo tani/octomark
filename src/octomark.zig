@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const MAX_BLOCK_NESTING = 32;
+const MAX_INLINE_NESTING = 32;
 
 const BlockType = enum(i32) {
     unordered_list = 0,
@@ -201,6 +202,10 @@ pub const OctomarkParser = struct {
     }
 
     fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
+        return parser.parseInlineContentDepth(text, output, 0);
+    }
+
+    fn parseInlineContentDepth(parser: *OctomarkParser, text: []const u8, output: anytype, depth: usize) !void {
         var i: usize = 0;
         while (i < text.len) {
             const start = i;
@@ -229,11 +234,13 @@ pub const OctomarkParser = struct {
             if (c == '_') {
                 if (std.mem.indexOfScalar(u8, text[i + 1 ..], '_')) |offset| {
                     const j = i + 1 + offset;
-                    try output.writeAll("<em>");
-                    try parser.parseInlineContent(text[i + 1 .. j], output);
-                    try output.writeAll("</em>");
-                    i = j + 1;
-                    continue;
+                    if (depth + 1 <= MAX_INLINE_NESTING) {
+                        try output.writeAll("<em>");
+                        try parser.parseInlineContentDepth(text[i + 1 .. j], output, depth + 1);
+                        try output.writeAll("</em>");
+                        i = j + 1;
+                        continue;
+                    }
                 }
             }
 
@@ -241,11 +248,13 @@ pub const OctomarkParser = struct {
             if (c == '*' and i + 1 < text.len and text[i + 1] == '*') {
                 if (std.mem.indexOf(u8, text[i + 2 ..], "**")) |offset| {
                     const j = i + 2 + offset;
-                    try output.writeAll("<strong>");
-                    try parser.parseInlineContent(text[i + 2 .. j], output);
-                    try output.writeAll("</strong>");
-                    i = j + 2;
-                    continue;
+                    if (depth + 1 <= MAX_INLINE_NESTING) {
+                        try output.writeAll("<strong>");
+                        try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
+                        try output.writeAll("</strong>");
+                        i = j + 2;
+                        continue;
+                    }
                 }
             }
 
@@ -265,11 +274,13 @@ pub const OctomarkParser = struct {
             if (c == '~' and i + 1 < text.len and text[i + 1] == '~') {
                 if (std.mem.indexOf(u8, text[i + 2 ..], "~~")) |offset| {
                     const j = i + 2 + offset;
-                    try output.writeAll("<del>");
-                    try parser.parseInlineContent(text[i + 2 .. j], output);
-                    try output.writeAll("</del>");
-                    i = j + 2;
-                    continue;
+                    if (depth + 1 <= MAX_INLINE_NESTING) {
+                        try output.writeAll("<del>");
+                        try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
+                        try output.writeAll("</del>");
+                        i = j + 2;
+                        continue;
+                    }
                 }
             }
 
@@ -292,15 +303,19 @@ pub const OctomarkParser = struct {
                                 try output.writeAll("\" alt=\"");
                                 try output.writeAll(label);
                                 try output.writeAll("\">");
+                                i = paren_end + 1;
+                                continue;
                             } else {
-                                try output.writeAll("<a href=\"");
-                                try output.writeAll(url);
-                                try output.writeAll("\">");
-                                try parser.parseInlineContent(label, output);
-                                try output.writeAll("</a>");
+                                if (depth + 1 <= MAX_INLINE_NESTING) {
+                                    try output.writeAll("<a href=\"");
+                                    try output.writeAll(url);
+                                    try output.writeAll("\">");
+                                    try parser.parseInlineContentDepth(label, output, depth + 1);
+                                    try output.writeAll("</a>");
+                                    i = paren_end + 1;
+                                    continue;
+                                }
                             }
-                            i = paren_end + 1;
-                            continue;
                         }
                     }
                 }
