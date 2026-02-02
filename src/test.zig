@@ -18,16 +18,16 @@ fn render(allocator: std.mem.Allocator, input: []const u8, enable_html: bool) ![
     defer parser.deinit(allocator);
     parser.setOptions(.{ .enable_html = enable_html });
 
-    var reader = std.io.Reader.fixed(input);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input);
+    const reader = fbs.reader();
 
-    try parser.parse(&reader, &writer_alloc.writer, allocator);
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+    const writer = list.writer();
 
-    const result = writer_alloc.writer.buffered();
-    const final = try allocator.alloc(u8, result.len);
-    @memcpy(final, result);
-    return final;
+    try parser.parse(reader, writer, allocator);
+
+    return list.toOwnedSlice();
 }
 
 test "octomark cases" {
@@ -98,12 +98,79 @@ test "NestingTooDeep" {
     }
     try input.appendSlice(allocator, "Deep");
 
-    var reader = std.io.Reader.fixed(input.items);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
+    var fbs = std.io.fixedBufferStream(input.items);
+    const reader = fbs.reader();
 
-    const result = parser.parse(&reader, &writer_alloc.writer, allocator);
+    var list = std.ArrayList(u8).init(allocator);
+    defer list.deinit();
+    const writer = list.writer();
+
+    const result = parser.parse(reader, writer, allocator);
     try std.testing.expectError(error.NestingTooDeep, result);
 }
 
 // Table Column Limit test removed - table auto-detection no longer supported (simplification #1)
+
+test "comprehensive cases" {
+    const cases = [_]TestCase{
+        tc("Header 1", "# H1", "<h1>H1</h1>\n", false),
+        tc("Header 2", "## H2", "<h2>H2</h2>\n", false),
+        tc("Header 3", "### H3", "<h3>H3</h3>\n", false),
+        tc("Header 4", "#### H4", "<h4>H4</h4>\n", false),
+        tc("Header 5", "##### H5", "<h5>H5</h5>\n", false),
+        tc("Header 6", "###### H6", "<h6>H6</h6>\n", false),
+        tc("Invalid Header 7", "####### H7", "<p>####### H7</p>\n", false),
+        tc("Invalid Header No Space", "#Header", "<p>#Header</p>\n", false),
+        tc("Header with Bold", "# **Bold**", "<h1><strong>Bold</strong></h1>\n", false),
+        tc("Header with Code", "## `Code`", "<h2><code>Code</code></h2>\n", false),
+        tc("Header with Link", "### [Link](url)", "<h3><a href=\"url\">Link</a></h3>\n", false),
+        tc("List Ordered Start 1", "1. Item", "<ol>\n<li>Item</li>\n</ol>\n", false),
+        tc("List Ordered Start 0", "0. Item", "<ol>\n<li>Item</li>\n</ol>\n", false),
+        tc("List Unordered Star", "* Item", "<p>* Item</p>\n", false),
+        tc("List Unordered Dash", "- Item", "<ul>\n<li>Item</li>\n</ul>\n", false),
+        tc("List Unordered Plus", "+ Item", "<p>+ Item</p>\n", false),
+        tc("List Nested 3 Levels", "- 1\n  - 2\n    - 3", "<ul>\n<li>1<ul>\n<li>2<ul>\n<li>3</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n", false),
+        tc("List Mixed Nesting", "- 1\n  1. 2", "<ul>\n<li>1<ol>\n<li>2</li>\n</ol>\n</li>\n</ul>\n", false),
+        tc("Task List Checked", "- [x] Done", "<ul>\n<li><input type=\"checkbox\" checked disabled> Done</li>\n</ul>\n", false),
+        tc("Task List Unchecked", "- [ ] Todo", "<ul>\n<li><input type=\"checkbox\"  disabled> Todo</li>\n</ul>\n", false),
+        tc("Task List Invalid", "- [o] Invalid", "<ul>\n<li>[o] Invalid</li>\n</ul>\n", false),
+        tc("Code Block Fenced Backtick", "```\ncode\n```", "<pre><code>code\n</code></pre>\n", false),
+        tc("Code Block Fenced Tilde", "~~~\ncode\n~~~", "<p>~~~\ncode\n~~~</p>\n", false),
+        tc("Code Block With Info", "```rust\nfn main() {}\n```", "<pre><code class=\"language-rust\">fn main() {}\n</code></pre>\n", false),
+        tc("Blockquote Simple", "> Quote", "<blockquote><p>Quote</p>\n</blockquote>\n", false),
+        tc("Blockquote Nested", "> > Quote", "<blockquote><blockquote><p>Quote</p>\n</blockquote>\n</blockquote>\n", false),
+        tc("Blockquote with Header", "> # Header", "<blockquote><h1>Header</h1>\n</blockquote>\n", false),
+        tc("Blockquote with List", "> - Item", "<blockquote><ul>\n<li>Item</li>\n</ul>\n</blockquote>\n", false),
+        tc("Bold Nested in Italic", "_**Bold**_", "<p><em><strong>Bold</strong></em></p>\n", false),
+        tc("Italic Nested in Bold", "**_Italic_**", "<p><strong><em>Italic</em></strong></p>\n", false),
+        tc("Bold Mismatch", "**Bold*", "<p>**Bold*</p>\n", false),
+        tc("Link Empty URL", "[Link]()", "<p><a href=\"\">Link</a></p>\n", false),
+        tc("Link Empty Text", "[](url)", "<p><a href=\"url\"></a></p>\n", false),
+        tc("Image Empty URL", "![Alt]()", "<p><img src=\"\" alt=\"Alt\"></p>\n", false),
+        tc("Image Empty Alt", "![](url)", "<p><img src=\"url\" alt=\"\"></p>\n", false),
+        tc("Auto Link HTTP", "http://example.com", "<p><a href=\"http://example.com\">http://example.com</a></p>\n", false),
+        tc("Auto Link HTTPS", "https://example.com", "<p><a href=\"https://example.com\">https://example.com</a></p>\n", false),
+        tc("Math Inline", "$E=mc^2$", "<p><span class=\"math\">E=mc^2</span></p>\n", false),
+        tc("Math Block", "$$\nE=mc^2\n$$", "<div class=\"math\">\nE=mc^2\n</div>\n", false),
+        tc("Table One Column", "| H |\n|---|\n| V |", "<table><thead><tr><th>H</th></tr></thead><tbody>\n<tr><td>V</td></tr>\n</tbody></table>\n", false),
+        tc("Table Alignment Left", "| H |\n|:--|\n| V |", "<table><thead><tr><th style=\"text-align:left\">H</th></tr></thead><tbody>\n<tr><td style=\"text-align:left\">V</td></tr>\n</tbody></table>\n", false),
+        tc("Table Alignment Center", "| H |\n|:-:|\n| V |", "<table><thead><tr><th style=\"text-align:center\">H</th></tr></thead><tbody>\n<tr><td style=\"text-align:center\">V</td></tr>\n</tbody></table>\n", false),
+        tc("Table Alignment Right", "| H |\n|--:|\n| V |", "<table><thead><tr><th style=\"text-align:right\">H</th></tr></thead><tbody>\n<tr><td style=\"text-align:right\">V</td></tr>\n</tbody></table>\n", false),
+        tc("Table Missing Cells", "| H1 | H2 |\n|----|----|\n| V1 |", "<table><thead><tr><th>H1</th><th>H2</th></tr></thead><tbody>\n<tr><td>V1</td></tr>\n</tbody></table>\n", false),
+        tc("Table Extra Cells", "| H1 |\n|----|\n| V1 | V2 |", "<table><thead><tr><th>H1</th></tr></thead><tbody>\n<tr><td>V1</td><td>V2</td></tr>\n</tbody></table>\n", false),
+        tc("HR Dash", "---", "<hr>\n", false),
+        tc("HR Star", "***", "<hr>\n", false),
+        tc("HR Underscore", "___", "<hr>\n", false),
+        tc("Escaped Asterisk", "\\*", "<p>*</p>\n", false),
+        tc("HTML Pass", "<div>Content</div>", "<p><div>Content</div></p>\n", true),
+        tc("Empty Input", "", "", false),
+        tc("Whitespace Input", "   ", "", false),
+    };
+
+    const allocator = std.testing.allocator;
+    for (cases) |case| {
+        const output = try render(allocator, case.input, case.enable_html);
+        defer allocator.free(output);
+        try std.testing.expectEqualStrings(case.expected, output);
+    }
+}

@@ -78,7 +78,7 @@ pub const OctomarkParser = struct {
     pub fn parse(self: *OctomarkParser, reader: anytype, writer: anytype, allocator: std.mem.Allocator) !void {
         var buffer: [4096]u8 = undefined;
         while (true) {
-            const n = try reader.readSliceShort(&buffer);
+            const n = try reader.read(&buffer);
             if (n == 0) break;
             try self.feed(buffer[0..n], writer, allocator);
         }
