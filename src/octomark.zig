@@ -202,6 +202,11 @@ pub const OctomarkParser = struct {
             // Backslash escape or line break
             if (c == '\\') {
                 if (i + 1 < text.len) {
+                    if (std.ascii.isAlphanumeric(text[i + 1])) {
+                        try output.writeByte('\\');
+                        i += 1;
+                        continue;
+                    }
                     i += 1;
                     try output.writeByte(text[i]);
                     i += 1;
@@ -272,8 +277,26 @@ pub const OctomarkParser = struct {
                 const is_image = (c == '!');
                 const bracket_start = if (is_image) i + 2 else i + 1;
 
-                if (std.mem.indexOfScalar(u8, text[bracket_start..], ']')) |bracket_offset| {
-                    const bracket_end = bracket_start + bracket_offset;
+                var bracket_end_opt: ?usize = null;
+                var bracket_depth: usize = 1;
+                var k = bracket_start;
+                while (k < text.len) : (k += 1) {
+                    if (text[k] == '\\' and k + 1 < text.len) {
+                        k += 1;
+                        continue;
+                    }
+                    if (text[k] == ']') {
+                        bracket_depth -= 1;
+                        if (bracket_depth == 0) {
+                            bracket_end_opt = k;
+                            break;
+                        }
+                    } else if (text[k] == '[') {
+                        bracket_depth += 1;
+                    }
+                }
+
+                if (bracket_end_opt) |bracket_end| {
                     if (bracket_end + 1 < text.len and text[bracket_end + 1] == '(') {
                         if (std.mem.indexOfScalar(u8, text[bracket_end + 2 ..], ')')) |paren_offset| {
                             const paren_end = bracket_end + 2 + paren_offset;
@@ -284,7 +307,15 @@ pub const OctomarkParser = struct {
                                 try output.writeAll("<img src=\"");
                                 try output.writeAll(url);
                                 try output.writeAll("\" alt=\"");
-                                try output.writeAll(label);
+                                var m: usize = 0;
+                                while (m < label.len) : (m += 1) {
+                                    if (label[m] == '\\' and m + 1 < label.len) {
+                                        m += 1;
+                                        try output.writeByte(label[m]);
+                                    } else {
+                                        try output.writeByte(label[m]);
+                                    }
+                                }
                                 try output.writeAll("\">");
                                 i = paren_end + 1;
                                 continue;
@@ -308,6 +339,16 @@ pub const OctomarkParser = struct {
             if (c == 'h' and i + 4 < text.len and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
                 var k = i;
                 while (k < text.len and !std.ascii.isWhitespace(text[k]) and text[k] != '<' and text[k] != '>') : (k += 1) {}
+
+                while (k > i) {
+                    const last = text[k - 1];
+                    if (last == ')' or last == '.' or last == ',' or last == ';' or last == '?' or last == '!') {
+                        k -= 1;
+                    } else {
+                        break;
+                    }
+                }
+
                 const url = text[i..k];
                 try output.writeAll("<a href=\"");
                 try output.writeAll(url);
@@ -320,8 +361,20 @@ pub const OctomarkParser = struct {
 
             // Math: $text$
             if (c == '$') {
-                if (std.mem.indexOfScalar(u8, text[i + 1 ..], '$')) |offset| {
-                    const j = i + 1 + offset;
+                var math_end: ?usize = null;
+                var k = i + 1;
+                while (k < text.len) : (k += 1) {
+                    if (text[k] == '\\' and k + 1 < text.len) {
+                        k += 1;
+                        continue;
+                    }
+                    if (text[k] == '$') {
+                        math_end = k;
+                        break;
+                    }
+                }
+
+                if (math_end) |j| {
                     try output.writeAll("<span class=\"math\">");
                     try parser.appendEscapedText(text[i + 1 .. j], output);
                     try output.writeAll("</span>");
@@ -355,7 +408,24 @@ pub const OctomarkParser = struct {
         const top = parser.currentBlockType();
         if (top != .code and top != .math) return false;
 
-        const trimmed = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
+        var text_slice = line;
+        var i: usize = 0;
+        while (i < parser.stack_depth) : (i += 1) {
+            const block = parser.block_stack[i];
+            if (block.block_type == .blockquote) {
+                const trimmed = std.mem.trimLeft(u8, text_slice, " \t");
+                if (trimmed.len > 0 and trimmed[0] == '>') {
+                    text_slice = trimmed[1..];
+                    if (text_slice.len > 0 and text_slice[0] == ' ') {
+                        text_slice = text_slice[1..];
+                    }
+                } else {
+                    return false;
+                }
+            }
+        }
+
+        const trimmed = std.mem.trimLeft(u8, text_slice, &std.ascii.whitespace);
 
         if (top == .code) {
             if (trimmed.len >= 3 and std.mem.eql(u8, trimmed[0..3], "```")) {
@@ -369,40 +439,78 @@ pub const OctomarkParser = struct {
             }
         }
 
-        try parser.appendEscapedText(line, output);
+        if (parser.stack_depth > 0) {
+            const indent = parser.block_stack[parser.stack_depth - 1].indent_level;
+            var k: i32 = 0;
+            while (k < indent and text_slice.len > 0 and text_slice[0] == ' ') {
+                text_slice = text_slice[1..];
+                k += 1;
+            }
+        }
+
+        try parser.appendEscapedText(text_slice, output);
         try output.writeByte('\n');
         return true;
     }
 
-    fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        if (line_content.len >= 3 and std.mem.eql(u8, line_content[0..3], "```")) {
+    fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
+        var content = line_content;
+        var extra_spaces: usize = 0;
+        while (content.len > 0 and content[0] == ' ') {
+            extra_spaces += 1;
+            content = content[1..];
+        }
+
+        if (content.len >= 3 and std.mem.eql(u8, content[0..3], "```")) {
             const block_type = parser.currentBlockType();
             if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderAndCloseTopBlock(output);
             }
             try output.writeAll("<pre><code");
             var lang_len: usize = 0;
-            while (3 + lang_len < line_content.len and !std.ascii.isWhitespace(line_content[3 + lang_len])) : (lang_len += 1) {}
+            while (3 + lang_len < content.len and !std.ascii.isWhitespace(content[3 + lang_len])) : (lang_len += 1) {}
             if (lang_len > 0) {
                 try output.writeAll(" class=\"language-");
-                try parser.appendEscapedText(line_content[3 .. 3 + lang_len], output);
+                try parser.appendEscapedText(content[3 .. 3 + lang_len], output);
                 try output.writeAll("\"");
             }
             try output.writeAll(">");
-            try parser.pushBlock(.code, 0);
+            try parser.pushBlock(.code, @intCast(leading_spaces + extra_spaces));
             return true;
         }
         return false;
     }
 
-    fn parseMathBlock(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        if (line_content.len >= 2 and std.mem.eql(u8, line_content[0..2], "$$")) {
+    fn parseMathBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
+        var content = line_content;
+        var extra_spaces: usize = 0;
+        while (content.len > 0 and content[0] == ' ') {
+            extra_spaces += 1;
+            content = content[1..];
+        }
+
+        if (content.len >= 2 and std.mem.eql(u8, content[0..2], "$$")) {
             const block_type = parser.currentBlockType();
             if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderAndCloseTopBlock(output);
             }
             try output.writeAll("<div class=\"math\">\n");
-            try parser.pushBlock(.math, 0);
+            try parser.pushBlock(.math, @intCast(leading_spaces + extra_spaces));
+
+            const remainder = content[2..];
+            const trimmed_rem = std.mem.trim(u8, remainder, " \t");
+            if (trimmed_rem.len > 0) {
+                if (trimmed_rem.len >= 2 and std.mem.eql(u8, trimmed_rem[trimmed_rem.len - 2 ..], "$$")) {
+                    const math_content = std.mem.trim(u8, trimmed_rem[0 .. trimmed_rem.len - 2], " \t");
+                    try parser.appendEscapedText(math_content, output);
+                    try output.writeByte('\n');
+                    try parser.renderAndCloseTopBlock(output);
+                } else {
+                    try parser.appendEscapedText(remainder, output);
+                    try output.writeByte('\n');
+                }
+            }
+
             return true;
         }
         return false;
@@ -444,11 +552,15 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: anytype) !bool {
+    fn parseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
         var line = line_content.*;
         if (line.len > 0 and line[0] == ':') {
+            var consumed: usize = 1;
             line = line[1..];
-            if (line.len > 0 and line[0] == ' ') line = line[1..];
+            if (line.len > 0 and line[0] == ' ') {
+                line = line[1..];
+                consumed += 1;
+            }
             try parser.closeParagraphIfOpen(output);
             var in_dl = false;
             var in_dd = false;
@@ -458,7 +570,7 @@ pub const OctomarkParser = struct {
             }
             if (!in_dl) {
                 try output.writeAll("<dl>\n");
-                try parser.pushBlock(.definition_list, @intCast(leading_spaces));
+                try parser.pushBlock(.definition_list, @intCast(leading_spaces.*));
             }
             if (in_dd) {
                 while (parser.currentBlockType() != .definition_list and parser.stack_depth > 0) {
@@ -466,14 +578,15 @@ pub const OctomarkParser = struct {
                 }
             }
             try output.writeAll("<dd>");
-            try parser.pushBlock(.definition_description, @intCast(leading_spaces));
+            try parser.pushBlock(.definition_description, @intCast(leading_spaces.*));
             line_content.* = line;
+            leading_spaces.* += consumed;
             return true;
         }
         return false;
     }
 
-    fn parseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: usize, output: anytype) !bool {
+    fn parseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
         var line = line_content.*;
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
         const internal_spaces: usize = line.len - trimmed_line.len;
@@ -484,7 +597,7 @@ pub const OctomarkParser = struct {
 
         if (is_ul or is_ol) {
             const target_type: BlockType = if (is_ul) .unordered_list else .ordered_list;
-            const current_indent: i32 = @intCast(leading_spaces + internal_spaces);
+            const current_indent: i32 = @intCast(leading_spaces.* + internal_spaces);
             while (parser.stack_depth > 0 and
                 parser.currentBlockType() != null and @intFromEnum(parser.currentBlockType().?) < @intFromEnum(BlockType.blockquote) and
                 (parser.block_stack[parser.stack_depth - 1].indent_level > current_indent or
@@ -510,8 +623,9 @@ pub const OctomarkParser = struct {
             }
 
             const marker_len: usize = if (is_ul) 2 else 3;
+            leading_spaces.* += internal_spaces + marker_len;
             line = line[internal_spaces + marker_len ..];
-            if (is_ul and line.len >= 4 and line[0] == '[' and (line[1] == ' ' or line[1] == 'x') and line[2] == ']' and line[3] == ' ') {
+            if (line.len >= 4 and line[0] == '[' and (line[1] == ' ' or line[1] == 'x') and line[2] == ']' and line[3] == ' ') {
                 try output.writeAll(if (line[1] == 'x') "<input type=\"checkbox\" checked disabled> " else "<input type=\"checkbox\"  disabled> ");
                 line = line[4..];
             }
@@ -643,6 +757,11 @@ pub const OctomarkParser = struct {
     }
 
     fn processParagraph(parser: *OctomarkParser, line_content: []const u8, is_dl: bool, is_list: bool, output: anytype) !void {
+        if (line_content.len == 0) {
+            try parser.closeParagraphIfOpen(output);
+            return;
+        }
+
         const block_type = parser.currentBlockType();
         const in_container = (parser.stack_depth > 0 and
             (block_type != null and
@@ -664,7 +783,7 @@ pub const OctomarkParser = struct {
         if (try parser.processLeafBlockContinuation(line, output)) return false;
 
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
-        const leading_spaces: usize = line.len - trimmed_line.len;
+        var leading_spaces: usize = line.len - trimmed_line.len;
         var line_content = trimmed_line;
 
         if (line_content.len == 0) {
@@ -679,10 +798,15 @@ pub const OctomarkParser = struct {
         }
 
         var quote_level: usize = 0;
-        while (line_content.len > 0 and line_content[0] == '>') {
-            quote_level += 1;
-            line_content = line_content[1..];
-            if (line_content.len > 0 and line_content[0] == ' ') line_content = line_content[1..];
+        while (true) {
+            const trimmed = std.mem.trimLeft(u8, line_content, " ");
+            if (trimmed.len > 0 and trimmed[0] == '>') {
+                quote_level += 1;
+                line_content = trimmed[1..];
+                if (line_content.len > 0 and line_content[0] == ' ') line_content = line_content[1..];
+            } else {
+                break;
+            }
         }
 
         var current_quote_level: usize = 0;
@@ -690,7 +814,7 @@ pub const OctomarkParser = struct {
             if (entry.block_type == .blockquote) current_quote_level += 1;
         }
 
-        if (quote_level < current_quote_level and parser.currentBlockType() == .paragraph) {
+        if (quote_level < current_quote_level and (parser.currentBlockType() == .paragraph or parser.currentBlockType() == .unordered_list or parser.currentBlockType() == .ordered_list or parser.currentBlockType() == .blockquote)) {
             const trimmed_for_block = std.mem.trimLeft(u8, line_content, &std.ascii.whitespace);
             if (!isBlockStartMarker(trimmed_for_block)) quote_level = current_quote_level;
         }
@@ -701,26 +825,51 @@ pub const OctomarkParser = struct {
             if (t == .blockquote) current_quote_level -= 1;
         }
 
-        while (parser.stack_depth < quote_level) {
+        while (current_quote_level < quote_level) {
             try parser.closeParagraphIfOpen(output);
             try output.writeAll("<blockquote>");
             try parser.pushBlock(.blockquote, 0);
+            current_quote_level += 1;
         }
 
-        const is_dl = try parser.parseDefinitionList(&line_content, leading_spaces, output);
-        const is_list = try parser.parseListItem(&line_content, leading_spaces, output);
+        const is_dl = try parser.parseDefinitionList(&line_content, &leading_spaces, output);
+        const is_list = try parser.parseListItem(&line_content, &leading_spaces, output);
 
         const trimmed_for_dispatch = std.mem.trimLeft(u8, line_content, " \t");
         if (trimmed_for_dispatch.len > 0) {
             switch (trimmed_for_dispatch[0]) {
                 '#' => if (try parser.parseHeader(line_content, output)) return false,
-                '`' => if (try parser.parseFencedCodeBlock(line_content, output)) return false,
-                '~' => if (try parser.parseFencedCodeBlock(line_content, output)) return false,
-                '$' => if (try parser.parseMathBlock(line_content, output)) return false,
+                '`' => if (try parser.parseFencedCodeBlock(line_content, leading_spaces, output)) return false,
+                '~' => if (try parser.parseFencedCodeBlock(line_content, leading_spaces, output)) return false,
+                '$' => if (try parser.parseMathBlock(line_content, leading_spaces, output)) return false,
                 '-' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '*' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '_' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return true,
+                '>' => {
+                    var content = line_content;
+                    var q_count: usize = 0;
+                    while (true) {
+                        const t = std.mem.trimLeft(u8, content, " ");
+                        if (t.len > 0 and t[0] == '>') {
+                            q_count += 1;
+                            content = t[1..];
+                            if (content.len > 0 and content[0] == ' ') content = content[1..];
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (q_count > 0) {
+                        try parser.closeParagraphIfOpen(output);
+                        var k: usize = 0;
+                        while (k < q_count) : (k += 1) {
+                            try output.writeAll("<blockquote>");
+                            try parser.pushBlock(.blockquote, 0);
+                        }
+                        line_content = content;
+                    }
+                },
                 else => {},
             }
         }
@@ -824,7 +973,22 @@ fn splitTableRowCells(str: []const u8, cells: *[64][]const u8) usize {
     if (cursor.len > 0 and cursor[0] == '|') cursor = cursor[1..];
 
     while (cursor.len > 0) {
-        const end_offset = std.mem.indexOfScalar(u8, cursor, '|') orelse cursor.len;
+        var end_offset: usize = 0;
+        var found = false;
+        var k: usize = 0;
+        while (k < cursor.len) : (k += 1) {
+            if (cursor[k] == '\\' and k + 1 < cursor.len) {
+                k += 1;
+                continue;
+            }
+            if (cursor[k] == '|') {
+                end_offset = k;
+                found = true;
+                break;
+            }
+        }
+        if (!found) end_offset = cursor.len;
+
         const cell = std.mem.trim(u8, cursor[0..end_offset], &std.ascii.whitespace);
         if (count < cells.len) {
             cells[count] = cell;
