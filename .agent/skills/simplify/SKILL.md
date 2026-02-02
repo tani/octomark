@@ -15,7 +15,8 @@ This skill focuses on radical LOC reduction through "The Big Flattening." By rem
 4. **No Private Abstractions**: Structs, enums, and helpers are overhead. Inline them to eliminate indirect calls (vtable/interface lookups) that trip up branch predictors.
 5. **Standard Library First**: Use `std` primitives. They are well-tested and often more "naive" and direct than complex custom wrappers.
 6. **Essential Logic Only**: If it’s not required for the core mission, delete it. Less code = fewer cache misses.
-7. **Preserve Stats & Timers**: Maintain diagnostic code, but keep it inline and non-intrusive.
+7. **Preserve Stats & Timers (DO NO DELETE!!)**: Maintain diagnostic code, but keep it inline and non-intrusive.
+8. **120 columns limit**: Keep lines under 120 columns.
 
 ## Tactics
 
