@@ -386,30 +386,13 @@ pub const OctomarkParser = struct {
         const _s = parser.startCall(.findNextSpecial);
         defer parser.endCall(.findNextSpecial, _s);
         var i = start;
-        const len = text.len;
-        // Unrolled loop for speed
-        while (i + 8 <= len) {
-            inline for (0..8) |offset| {
-                const idx = i + offset;
-                const c = text[idx];
-                if (special_chars_lut[c]) return idx;
-                if (c == 'h') {
-                    if (idx + 4 < len and (std.mem.startsWith(u8, text[idx..], "http:") or std.mem.startsWith(u8, text[idx..], "https:"))) return idx;
-                }
-            }
-            i += 8;
+        while (std.mem.indexOfAny(u8, text[i..], special_chars ++ "h")) |offset| {
+            i += offset;
+            if (text[i] != 'h') return i;
+            if (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:")) return i;
+            i += 1;
         }
-
-        while (i < len) : (i += 1) {
-            const c = text[i];
-            if (special_chars_lut[c]) return i;
-            if (c == 'h') {
-                if (i + 4 < text.len and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
-                    return i;
-                }
-            }
-        }
-        return len;
+        return text.len;
     }
 
     pub fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) anyerror!void {
@@ -549,44 +532,82 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.scanInline, _s);
 
         var i: usize = 0;
-        const delimiters = "*_`<\\";
-        while (i < text.len) {
-            const next = std.mem.indexOfAny(u8, text[i..], delimiters);
-            if (next) |offset| {
-                i += offset;
-                const c = text[i];
-                switch (c) {
-                    '*', '_' => {
-                        const next_pos = try parser.scanDelimiters(text, i, c, stack_bottom);
-                        i = next_pos;
-                    },
-                    '`' => {
-                        var backtick_count: usize = 1;
-                        var k = i + 1;
-                        while (k < text.len and text[k] == '`') : (k += 1) {
-                            backtick_count += 1;
-                        }
+        const len = text.len;
 
-                        // Optimized search for end
-                        if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |match_offset| {
-                            i = i + backtick_count + match_offset + backtick_count;
-                        } else {
-                            i += backtick_count;
-                        }
-                    },
-                    '<' => {
-                        const tag_len = parser.parseHtmlTag(text[i..]);
-                        if (tag_len > 0) {
-                            i += tag_len;
-                        } else {
-                            i += 1;
-                        }
-                    },
-                    '\\' => i += 2,
-                    else => i += 1,
+        while (i + 8 <= len) {
+            blk: {
+                inline for (0..8) |offset| {
+                    const idx = i + offset;
+                    const c = text[idx];
+                    switch (c) {
+                        '*', '_' => {
+                            const next_pos = try parser.scanDelimiters(text, idx, c, stack_bottom);
+                            i = next_pos;
+                            break :blk;
+                        },
+                        '`' => {
+                            var backtick_count: usize = 1;
+                            var k = idx + 1;
+                            while (k < len and text[k] == '`') : (k += 1) {
+                                backtick_count += 1;
+                            }
+                            if (std.mem.indexOf(u8, text[idx + backtick_count ..], text[idx .. idx + backtick_count])) |match_offset| {
+                                i = idx + backtick_count + match_offset + backtick_count;
+                            } else {
+                                i = idx + backtick_count;
+                            }
+                            break :blk;
+                        },
+                        '<' => {
+                            const tag_len = parser.parseHtmlTag(text[idx..]);
+                            if (tag_len > 0) {
+                                i = idx + tag_len;
+                            } else {
+                                i = idx + 1;
+                            }
+                            break :blk;
+                        },
+                        '\\' => {
+                            i = idx + 2;
+                            break :blk;
+                        },
+                        else => {},
+                    }
                 }
-            } else {
-                break;
+                // If we reached here (no break), we processed 8 chars successfully without special handling
+                i += 8;
+            }
+        }
+
+        while (i < len) {
+            const c = text[i];
+            switch (c) {
+                '*', '_' => {
+                    const next_pos = try parser.scanDelimiters(text, i, c, stack_bottom);
+                    i = next_pos;
+                },
+                '`' => {
+                    var backtick_count: usize = 1;
+                    var k = i + 1;
+                    while (k < len and text[k] == '`') : (k += 1) {
+                        backtick_count += 1;
+                    }
+                    if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |match_offset| {
+                        i = i + backtick_count + match_offset + backtick_count;
+                    } else {
+                        i += backtick_count;
+                    }
+                },
+                '<' => {
+                    const tag_len = parser.parseHtmlTag(text[i..]);
+                    if (tag_len > 0) {
+                        i += tag_len;
+                    } else {
+                        i += 1;
+                    }
+                },
+                '\\' => i += 2,
+                else => i += 1,
             }
         }
     }
