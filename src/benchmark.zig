@@ -37,15 +37,16 @@ pub fn main() !void {
         try parser.init(allocator);
         defer parser.deinit(allocator);
 
-        var out_buf: [4096]u8 = undefined;
-        var stdout_writer = null_file.writer(&out_buf);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = null_file.writer(&write_buffer);
 
         var timer = try std.time.Timer.start();
 
-        var reader = std.io.Reader.fixed(data);
+        var stream = std.io.fixedBufferStream(data);
+        const reader = stream.reader();
 
-        try parser.parse(&reader, &stdout_writer.interface, allocator);
-        try stdout_writer.interface.flush();
+        try parser.parse(reader, &writer.interface, allocator);
+        try writer.interface.flush();
 
         const elapsed_ns = timer.read();
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;

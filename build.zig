@@ -16,9 +16,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "octomark",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     exe.root_module.addImport("octomark", mod);
 
@@ -34,9 +36,11 @@ pub fn build(b: *std.Build) void {
 
     const benchmark_exe = b.addExecutable(.{
         .name = "octomark-benchmark",
-        .root_source_file = b.path("src/benchmark.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     benchmark_exe.root_module.addImport("octomark", mod);
 
@@ -48,9 +52,11 @@ pub fn build(b: *std.Build) void {
     bench_run.step.dependOn(b.getInstallStep());
 
     const tests = b.addTest(.{
-        .root_source_file = b.path("src/test.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     tests.root_module.addImport("octomark", mod);
 

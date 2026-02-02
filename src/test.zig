@@ -21,13 +21,13 @@ fn render(allocator: std.mem.Allocator, input: []const u8, enable_html: bool) ![
     var fbs = std.io.fixedBufferStream(input);
     const reader = fbs.reader();
 
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
-    const writer = list.writer();
+    var list = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer list.deinit(allocator);
+    const writer = list.writer(allocator);
 
     try parser.parse(reader, writer, allocator);
 
-    return list.toOwnedSlice();
+    return list.toOwnedSlice(allocator);
 }
 
 test "octomark cases" {
@@ -101,9 +101,9 @@ test "NestingTooDeep" {
     var fbs = std.io.fixedBufferStream(input.items);
     const reader = fbs.reader();
 
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
-    const writer = list.writer();
+    var list = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer list.deinit(allocator);
+    const writer = list.writer(allocator);
 
     const result = parser.parse(reader, writer, allocator);
     try std.testing.expectError(error.NestingTooDeep, result);

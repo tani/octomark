@@ -11,12 +11,12 @@ pub fn main() !void {
     const stdin = std.fs.File.stdin();
     const stdout = std.fs.File.stdout();
 
-    var in_buf: [4096]u8 = undefined;
-    var out_buf: [4096]u8 = undefined;
+    var read_buffer: [4096]u8 = undefined;
+    var write_buffer: [4096]u8 = undefined;
 
-    var stdin_reader = stdin.reader(&in_buf);
-    var stdout_writer = stdout.writer(&out_buf);
+    var reader = stdin.reader(&read_buffer);
+    var writer = stdout.writer(&write_buffer);
 
-    try parser.parse(&stdin_reader.interface, &stdout_writer.interface, allocator);
-    try stdout_writer.interface.flush();
+    try parser.parse(&reader.interface, &writer.interface, allocator);
+    try writer.interface.flush();
 }
