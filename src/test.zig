@@ -49,6 +49,7 @@ test "octomark cases" {
         tc("Inline Styles", "**Bold** and _Italic_ and `Code`", "<p><strong>Bold</strong> and <em>Italic</em> and <code>Code</code></p>\n", false),
         tc("Links", "[Google](https://google.com)", "<p><a href=\"https://google.com\">Google</a></p>\n", false),
         tc("Escaping", "\\*Not Bold\\*", "<p>*Not Bold*</p>\n", false),
+        tc("Tab Indented Code", "\tcode", "<pre><code>code\n</code></pre>\n", false),
         tc("Unordered List", "- Item 1\n- Item 2", "<ul>\n<li>Item 1</li>\n<li>Item 2</li>\n</ul>\n", false),
         tc("Task List", "- [ ] Todo\n- [x] Done", "<ul>\n<li><input type=\"checkbox\"  disabled> Todo</li>\n<li><input type=\"checkbox\" checked disabled> Done</li>\n</ul>\n", false),
         tc("Nested List (2 spaces)", "- Level 1\n  - Level 2\n- Back to 1", "<ul>\n<li>Level 1<ul>\n<li>Level 2</li>\n</ul>\n</li>\n<li>Back to 1</li>\n</ul>\n", false),

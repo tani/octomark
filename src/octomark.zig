@@ -65,6 +65,57 @@ const html_escape_map = blk: {
     break :blk map;
 };
 
+const IndentInfo = struct {
+    idx: usize,
+    columns: usize,
+};
+
+fn leadingIndent(line: []const u8) IndentInfo {
+    var idx: usize = 0;
+    var columns: usize = 0;
+    while (idx < line.len) {
+        switch (line[idx]) {
+            ' ' => {
+                idx += 1;
+                columns += 1;
+            },
+            '\t' => {
+                idx += 1;
+                columns += 4 - (columns % 4);
+            },
+            '\r' => {
+                idx += 1;
+                columns += 1;
+            },
+            else => break,
+        }
+    }
+    return .{ .idx = idx, .columns = columns };
+}
+
+fn stripIndentColumns(line: []const u8, columns: usize) []const u8 {
+    var idx: usize = 0;
+    var col: usize = 0;
+    while (idx < line.len and col < columns) {
+        switch (line[idx]) {
+            ' ' => {
+                idx += 1;
+                col += 1;
+            },
+            '\t' => {
+                idx += 1;
+                col += 4 - (col % 4);
+            },
+            '\r' => {
+                idx += 1;
+                col += 1;
+            },
+            else => break,
+        }
+    }
+    return line[idx..];
+}
+
 
 pub const OctomarkParser = struct {
     table_alignments: [64]TableAlignment = [_]TableAlignment{TableAlignment.none} ** 64,
@@ -909,7 +960,7 @@ pub const OctomarkParser = struct {
                 const trimmed = std.mem.trimLeft(u8, text_slice, " \t");
                 if (trimmed.len > 0 and trimmed[0] == '>') {
                     text_slice = trimmed[1..];
-                    if (text_slice.len > 0 and text_slice[0] == ' ') {
+                    if (text_slice.len > 0 and (text_slice[0] == ' ' or text_slice[0] == '\t')) {
                         text_slice = text_slice[1..];
                     }
                 } else {
@@ -931,26 +982,23 @@ pub const OctomarkParser = struct {
                 return true;
             }
         } else if (top == .indented_code) {
-            const trimmed_spaces = std.mem.trimLeft(u8, text_slice, " ");
-            const spaces = text_slice.len - trimmed_spaces.len;
+            const indent = leadingIndent(text_slice);
+            const spaces = indent.columns;
             const is_blank = (spaces == text_slice.len);
             if (!is_blank) {
                 if (spaces < 4) {
                     try parser.renderAndCloseTopBlock(output);
                     return false;
                 }
-                text_slice = text_slice[4..];
+                text_slice = stripIndentColumns(text_slice, 4);
             }
         }
 
         if (parser.stack_depth > 0) {
             const indent = parser.block_stack[parser.stack_depth - 1].indent_level;
             if (indent > 0 and text_slice.len > 0) {
-                const trimmed_spaces = std.mem.trimLeft(u8, text_slice, " ");
-                const spaces = text_slice.len - trimmed_spaces.len;
                 const indent_usize: usize = @intCast(indent);
-                const remove = if (spaces < indent_usize) spaces else indent_usize;
-                text_slice = text_slice[remove..];
+                text_slice = stripIndentColumns(text_slice, indent_usize);
             }
         }
 
@@ -1313,9 +1361,9 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.processSingleLine, _s);
         if (try parser.processLeafBlockContinuation(line, output)) return false;
 
-        const trimmed = std.mem.trimLeft(u8, line, " \t\r");
-        var leading_spaces: usize = line.len - trimmed.len;
-        var line_content = trimmed;
+        const indent = leadingIndent(line);
+        var leading_spaces: usize = indent.columns;
+        var line_content = line[indent.idx..];
 
         if (line_content.len == 0) {
             const block_type = parser.currentBlockType();
@@ -1332,11 +1380,11 @@ pub const OctomarkParser = struct {
         {
             var i: usize = 0;
             while (i < line_content.len) {
-                while (i < line_content.len and line_content[i] == ' ') : (i += 1) {}
+                while (i < line_content.len and (line_content[i] == ' ' or line_content[i] == '\t')) : (i += 1) {}
                 if (i < line_content.len and line_content[i] == '>') {
                     quote_level += 1;
                     i += 1;
-                    if (i < line_content.len and line_content[i] == ' ') i += 1;
+                    if (i < line_content.len and (line_content[i] == ' ' or line_content[i] == '\t')) i += 1;
                     line_content = line_content[i..];
                     i = 0;
                 } else break;
@@ -1389,11 +1437,11 @@ pub const OctomarkParser = struct {
                     var lc = line_content;
                     while (true) {
                         var k: usize = 0;
-                        while (k < lc.len and lc[k] == ' ') : (k += 1) {}
+                        while (k < lc.len and (lc[k] == ' ' or lc[k] == '\t')) : (k += 1) {}
                         if (k < lc.len and lc[k] == '>') {
                             q_cnt += 1;
                             k += 1;
-                            if (k < lc.len and lc[k] == ' ') k += 1;
+                            if (k < lc.len and (lc[k] == ' ' or lc[k] == '\t')) k += 1;
                             lc = lc[k..];
                         } else break;
                     }
