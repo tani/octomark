@@ -560,20 +560,17 @@ pub const OctomarkParser = struct {
                             if (std.mem.indexOfAny(u8, lc, " \t\n") == null) {
                                 var al = false;
                                 var em_l = false;
-                                if (std.mem.indexOfScalar(u8, lc, ':')) |s_off| {
-                                    const sch = lc[0..s_off];
-                                    var all_a = sch.len >= 2 and sch.len <= 32 and std.ascii.isAlphabetic(sch[0]);
-                                    if (all_a) {
-                                        for (sch[1..]) |sc| {
-                                            if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
-                                                all_a = false;
-                                                break;
-                                            }
-                                        }
+                                if (std.mem.indexOfScalar(u8, lc, ':')) |sc_i| {
+                                    const sch = lc[0..sc_i];
+                                    if (sch.len >= 2 and sch.len <= 32 and std.ascii.isAlphabetic(sch[0])) {
+                                        al = true;
+                                        for (sch[1..]) |sc| if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
+                                            al = false;
+                                            break;
+                                        };
                                     }
-                                    if (all_a) al = true;
-                                } else if (std.mem.indexOfScalar(u8, lc, '@')) |a_off| {
-                                    if (a_off > 0 and a_off < lc.len - 1 and std.mem.indexOfScalar(u8, lc[a_off + 1 ..], '.') != null) {
+                                } else if (std.mem.indexOfScalar(u8, lc, '@')) |a| {
+                                    if (a > 0 and a < lc.len - 1 and std.mem.indexOfScalar(u8, lc[a + 1 ..], '.') != null) {
                                         al = true;
                                         em_l = true;
                                     }
@@ -630,15 +627,14 @@ pub const OctomarkParser = struct {
                     var decoded_len: usize = 0;
                     if (j < text.len and text[j] == '#') {
                         j += 1;
-                        var base: u8 = 10;
-                        if (j < text.len and (text[j] == 'x' or text[j] == 'X')) {
-                            base = 16;
+                        const b: u8 = if (j < text.len and (text[j] | 32) == 'x') blk: {
                             j += 1;
-                        }
-                        const start = j;
-                        while (j < text.len and (if (base == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1) {}
-                        if (j > start and j < text.len and text[j] == ';') {
-                            const cp = std.fmt.parseInt(u21, text[start..j], base) catch 0;
+                            break :blk 16;
+                        } else 10;
+                        const cp_s = j;
+                        while (j < text.len and (if (b == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1) {}
+                        if (j > cp_s and j < text.len and text[j] == ';') {
+                            const cp = std.fmt.parseInt(u21, text[cp_s..j], b) catch 0;
                             if (cp > 0) decoded_len = std.unicode.utf8Encode(@intCast(cp), &decoded) catch 0;
                             if (decoded_len > 0) {
                                 try p.esc(decoded[0..decoded_len], o);
@@ -650,15 +646,15 @@ pub const OctomarkParser = struct {
                         while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
                         if (j > i + 1 and j < text.len and text[j] == ';') {
                             const en = text[i + 1 .. j];
-                            const d_opt: ?[]const u8 = switch (en.len) {
+                            const d: ?[]const u8 = switch (en.len) {
                                 2 => if (std.mem.eql(u8, en, "lt")) "<" else if (std.mem.eql(u8, en, "gt")) ">" else null,
                                 3 => if (std.mem.eql(u8, en, "amp")) "&" else null,
                                 4 => if (std.mem.eql(u8, en, "quot")) "\"" else if (std.mem.eql(u8, en, "apos")) "'" else if (std.mem.eql(u8, en, "copy")) "©" else if (std.mem.eql(u8, en, "nbsp")) "\u{00A0}" else null,
                                 5 => if (std.mem.eql(u8, en, "ndash")) "–" else if (std.mem.eql(u8, en, "mdash")) "—" else null,
                                 else => null,
                             };
-                            if (d_opt) |d| {
-                                try p.esc(d, o);
+                            if (d) |v| {
+                                try p.esc(v, o);
                                 i = j + 1;
                                 h = true;
                             }
@@ -1299,34 +1295,36 @@ pub const OctomarkParser = struct {
             var i: usize = 0;
             var col: usize = ls;
             while (i < lc.len) {
-                while (i < lc.len) {
-                    if (lc[i] == ' ') {
-                        i += 1;
-                        col += 1;
-                    } else if (lc[i] == '\t') {
-                        i += 1;
-                        col += 4 - (col % 4);
-                    } else break;
-                }
+                const start_i = i;
+                while (i < lc.len) : (i += 1) switch (lc[i]) {
+                    ' ' => col += 1,
+                    '\t' => col += 4 - (col % 4),
+                    else => break,
+                };
                 if (i < lc.len and lc[i] == '>') {
                     q_lv += 1;
                     i += 1;
                     col += 1;
-                    if (i < lc.len) {
-                        if (lc[i] == ' ') {
+                    if (i < lc.len) switch (lc[i]) {
+                        ' ' => {
                             i += 1;
                             col += 1;
-                        } else if (lc[i] == '\t') {
+                        },
+                        '\t' => {
                             const tw = 4 - (col % 4);
                             i += 1;
                             col += tw;
                             if (tw > 0) ex_id += tw - 1;
-                        }
-                    }
+                        },
+                        else => {},
+                    };
                     lc = lc[i..];
                     i = 0;
                     col = 0;
-                } else break;
+                } else {
+                    i = start_i;
+                    break;
+                }
             }
         }
         ls += ex_id;
