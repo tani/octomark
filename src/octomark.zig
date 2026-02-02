@@ -180,11 +180,31 @@ pub const OctomarkParser = struct {
         }
     }
 
+    fn findNextSpecial(text: []const u8, start: usize) usize {
+        var i = start;
+        while (i + 8 <= text.len) {
+            const b0 = text[i];
+            const b1 = text[i + 1];
+            const b2 = text[i + 2];
+            const b3 = text[i + 3];
+            const b4 = text[i + 4];
+            const b5 = text[i + 5];
+            const b6 = text[i + 6];
+            const b7 = text[i + 7];
+            if (is_special_char[b0] or is_special_char[b1] or is_special_char[b2] or is_special_char[b3] or is_special_char[b4] or is_special_char[b5] or is_special_char[b6] or is_special_char[b7]) {
+                break;
+            }
+            i += 8;
+        }
+        while (i < text.len and !is_special_char[text[i]]) : (i += 1) {}
+        return i;
+    }
+
     fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
         var i: usize = 0;
         while (i < text.len) {
             const start = i;
-            while (i < text.len and !is_special_char[text[i]]) : (i += 1) {}
+            i = findNextSpecial(text, i);
 
             if (i > start) try output.writeAll(text[start..i]);
             if (i >= text.len) break;
@@ -503,7 +523,7 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseTable(parser: *OctomarkParser, line_content: []const u8, _: []const u8, _: usize, output: anytype) !bool {
+    fn parseTable(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
         // 1. If we are already IN a table, process body rows strictly.
         if (parser.currentBlockType() == .table) {
             const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
@@ -544,9 +564,59 @@ pub const OctomarkParser = struct {
             }
         }
 
-        // Not in a table and no buffering support - tables must be started explicitly
-        // This is a simplification: we no longer auto-detect tables from header+separator
-        return false;
+        if (current_pos >= full_data.len) return false;
+        if (!isNextLineTableSeparator(full_data, current_pos)) return false;
+
+        const sep_line_end = if (std.mem.indexOfScalar(u8, full_data[current_pos..], '\n')) |nl|
+            current_pos + nl
+        else
+            full_data.len;
+        const sep_line = full_data[current_pos..sep_line_end];
+
+        var header_cells: [64][]const u8 = undefined;
+        const header_count = splitTableRowCells(line_content, &header_cells);
+
+        var sep_cells: [64][]const u8 = undefined;
+        const sep_count = splitTableRowCells(sep_line, &sep_cells);
+
+        parser.table_column_count = header_count;
+        var k: usize = 0;
+        while (k < header_count) : (k += 1) {
+            var col_align = TableAlignment.none;
+            if (k < sep_count) {
+                const cell = sep_cells[k];
+                if (cell.len > 0) {
+                    const left = cell[0] == ':';
+                    const right = cell[cell.len - 1] == ':';
+                    col_align = if (left and right) TableAlignment.center else if (left) TableAlignment.left else if (right) TableAlignment.right else TableAlignment.none;
+                }
+            }
+            parser.table_alignments[k] = col_align;
+        }
+
+        const block_type = parser.currentBlockType();
+        if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+            try parser.renderAndCloseTopBlock(output);
+        }
+
+        try output.writeAll("<table><thead><tr>");
+        k = 0;
+        while (k < header_count) : (k += 1) {
+            try output.writeAll("<th");
+            const col_align = parser.table_alignments[k];
+            switch (col_align) {
+                .left => try output.writeAll(" style=\"text-align:left\""),
+                .center => try output.writeAll(" style=\"text-align:center\""),
+                .right => try output.writeAll(" style=\"text-align:right\""),
+                .none => {},
+            }
+            try output.writeAll(">");
+            try parser.parseInlineContent(header_cells[k], output);
+            try output.writeAll("</th>");
+        }
+        try output.writeAll("</tr></thead><tbody>\n");
+        try parser.pushBlock(.table, 0);
+        return true;
     }
 
     fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_data: []const u8, current_pos: usize, output: anytype) !bool {
@@ -652,7 +722,7 @@ pub const OctomarkParser = struct {
                 '-' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '*' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '_' => if (try parser.parseHorizontalRule(line_content, output)) return false,
-                '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return false,
+                '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return true,
                 else => {},
             }
         }
