@@ -3,16 +3,30 @@ const std = @import("std");
 const MAX_BLOCK_NESTING = 32;
 const MAX_INLINE_NESTING = 32;
 
-const BlockType = enum(i32) {
-    unordered_list = 0,
-    ordered_list = 1,
-    blockquote = 2,
-    definition_list = 3,
-    definition_description = 4,
-    code = 5,
-    math = 6,
-    table = 7,
-    paragraph = 8,
+const BlockType = enum(u8) {
+    unordered_list,
+    ordered_list,
+    blockquote,
+    definition_list,
+    definition_description,
+    code,
+    math,
+    table,
+    paragraph,
+};
+
+const block_close_tags = blk: {
+    var tags: [std.enums.values(BlockType).len][]const u8 = undefined;
+    tags[@intFromEnum(BlockType.unordered_list)] = "</li>\n</ul>\n";
+    tags[@intFromEnum(BlockType.ordered_list)] = "</li>\n</ol>\n";
+    tags[@intFromEnum(BlockType.blockquote)] = "</blockquote>\n";
+    tags[@intFromEnum(BlockType.definition_list)] = "</dl>\n";
+    tags[@intFromEnum(BlockType.definition_description)] = "</dd>\n";
+    tags[@intFromEnum(BlockType.code)] = "</code></pre>\n";
+    tags[@intFromEnum(BlockType.math)] = "</div>\n";
+    tags[@intFromEnum(BlockType.table)] = "</tbody></table>\n";
+    tags[@intFromEnum(BlockType.paragraph)] = "</p>\n";
+    break :blk tags;
 };
 
 const TableAlignment = enum {
@@ -176,22 +190,17 @@ pub const OctomarkParser = struct {
     fn renderAndCloseTopBlock(parser: *OctomarkParser, output: anytype) !void {
         if (parser.stack_depth == 0) return;
         const block_type = parser.block_stack[parser.stack_depth - 1].block_type;
-        parser.popBlock();
-        switch (block_type) {
-            .unordered_list => try writeAll(output, "</li>\n</ul>\n"),
-            .ordered_list => try writeAll(output, "</li>\n</ol>\n"),
-            .blockquote => try writeAll(output, "</blockquote>\n"),
-            .definition_list => try writeAll(output, "</dl>\n"),
-            .definition_description => try writeAll(output, "</dd>\n"),
-            .code => try writeAll(output, "</code></pre>\n"),
-            .math => try writeAll(output, "</div>\n"),
-            .table => try writeAll(output, "</tbody></table>\n"),
-            .paragraph => try writeAll(output, "</p>\n"),
-        }
+        parser.stack_depth -= 1;
+        try writeAll(output, block_close_tags[@intFromEnum(block_type)]);
     }
 
     fn closeParagraphIfOpen(parser: *OctomarkParser, output: anytype) !void {
         if (parser.currentBlockType() == .paragraph) try parser.renderAndCloseTopBlock(output);
+    }
+
+    fn tryCloseLeafBlock(parser: *OctomarkParser, output: anytype) !void {
+        const bt = parser.currentBlockType() orelse return;
+        if (@intFromEnum(bt) >= @intFromEnum(BlockType.code)) try parser.renderAndCloseTopBlock(output);
     }
 
     fn appendEscapedText(parser: *const OctomarkParser, text: []const u8, output: anytype) !void {
@@ -249,33 +258,34 @@ pub const OctomarkParser = struct {
                 }
             }
 
-            // Italic: _text_
-            if (c == '_') {
-                if (std.mem.indexOfScalar(u8, text[i + 1 ..], '_')) |offset| {
-                    const j = i + 1 + offset;
-                    if (depth + 1 <= MAX_INLINE_NESTING) {
-                        try writeAll(output, "<em>");
-                        try parser.parseInlineContentDepth(text[i + 1 .. j], output, depth + 1);
-                        try writeAll(output, "</em>");
-                        i = j + 1;
-                        continue;
-                    }
-                }
-            }
+            // Paired delimiters: **bold**, _italic_, ~~strikethrough~~
+            const delims = [_]struct { tag: []const u8, marker: []const u8 }{
+                .{ .tag = "strong", .marker = "**" },
+                .{ .tag = "em", .marker = "_" },
+                .{ .tag = "del", .marker = "~~" },
+            };
 
-            // Bold: **text**
-            if (c == '*' and i + 1 < text.len and text[i + 1] == '*') {
-                if (std.mem.indexOf(u8, text[i + 2 ..], "**")) |offset| {
-                    const j = i + 2 + offset;
-                    if (depth + 1 <= MAX_INLINE_NESTING) {
-                        try writeAll(output, "<strong>");
-                        try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
-                        try writeAll(output, "</strong>");
-                        i = j + 2;
-                        continue;
+            var handled = false;
+            for (delims) |d| {
+                if (std.mem.startsWith(u8, text[i..], d.marker)) {
+                    if (std.mem.indexOf(u8, text[i + d.marker.len ..], d.marker)) |offset| {
+                        const j = i + d.marker.len + offset;
+                        if (depth + 1 <= MAX_INLINE_NESTING) {
+                            try writeAll(output, "<");
+                            try writeAll(output, d.tag);
+                            try writeAll(output, ">");
+                            try parser.parseInlineContentDepth(text[i + d.marker.len .. j], output, depth + 1);
+                            try writeAll(output, "</");
+                            try writeAll(output, d.tag);
+                            try writeAll(output, ">");
+                            i = j + d.marker.len;
+                            handled = true;
+                            break;
+                        }
                     }
                 }
             }
+            if (handled) continue;
 
             // Code: `text`
             if (c == '`') {
@@ -298,20 +308,6 @@ pub const OctomarkParser = struct {
                     try writeAll(output, "</code>");
                     i = j + backtick_count;
                     continue;
-                }
-            }
-
-            // Strikethrough (~~text~~)
-            if (c == '~' and i + 1 < text.len and text[i + 1] == '~') {
-                if (std.mem.indexOf(u8, text[i + 2 ..], "~~")) |offset| {
-                    const j = i + 2 + offset;
-                    if (depth + 1 <= MAX_INLINE_NESTING) {
-                        try writeAll(output, "<del>");
-                        try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
-                        try writeAll(output, "</del>");
-                        i = j + 2;
-                        continue;
-                    }
                 }
             }
 
@@ -611,38 +607,28 @@ pub const OctomarkParser = struct {
             var real_level: usize = 0;
             while (real_level < line_content.len and line_content[real_level] == '#') : (real_level += 1) {}
 
-            if (real_level > 6) return false;
-            if (real_level == 0) return false;
+            if (real_level > 6 or real_level == 0) return false;
 
             level = real_level;
             const content_start: usize = if (level < line_content.len and line_content[level] == ' ') level + 1 else level;
 
-            if (level > 0) {
-                const block_type = parser.currentBlockType();
-                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-                    try parser.renderAndCloseTopBlock(output);
-                }
-                const level_u8: u8 = @intCast(level);
-                const level_char: u8 = '0' + level_u8;
-                try writeAll(output, "<h");
-                try writeByte(output, level_char);
-                try writeAll(output, ">");
-                try parser.parseInlineContent(line_content[content_start..], output);
-                try writeAll(output, "</h");
-                try writeByte(output, level_char);
-                try writeAll(output, ">\n");
-                return true;
-            }
+            try parser.tryCloseLeafBlock(output);
+            const level_char: u8 = '0' + @as(u8, @intCast(level));
+            try writeAll(output, "<h");
+            try writeByte(output, level_char);
+            try writeAll(output, ">");
+            try parser.parseInlineContent(line_content[content_start..], output);
+            try writeAll(output, "</h");
+            try writeByte(output, level_char);
+            try writeAll(output, ">\n");
+            return true;
         }
         return false;
     }
 
     fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
         if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
-            const block_type = parser.currentBlockType();
-            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-                try parser.renderAndCloseTopBlock(output);
-            }
+            try parser.tryCloseLeafBlock(output);
             try writeAll(output, "<hr>\n");
             return true;
         }
@@ -768,13 +754,7 @@ pub const OctomarkParser = struct {
                 var k: usize = 0;
                 while (k < body_count) : (k += 1) {
                     try writeAll(output, "<td");
-                    const col_align = if (k < parser.table_column_count) parser.table_alignments[k] else TableAlignment.none;
-                    switch (col_align) {
-                        .left => try writeAll(output, " style=\"text-align:left\""),
-                        .center => try writeAll(output, " style=\"text-align:center\""),
-                        .right => try writeAll(output, " style=\"text-align:right\""),
-                        .none => {},
-                    }
+                    writeTableAlignment(output, if (k < parser.table_column_count) parser.table_alignments[k] else .none) catch {};
                     try writeAll(output, ">");
                     try parser.parseInlineContent(body_cells[k], output);
                     try writeAll(output, "</td>");
@@ -819,22 +799,13 @@ pub const OctomarkParser = struct {
             parser.table_alignments[k] = col_align;
         }
 
-        const block_type = parser.currentBlockType();
-        if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-            try parser.renderAndCloseTopBlock(output);
-        }
+        try parser.tryCloseLeafBlock(output);
 
         try writeAll(output, "<table><thead><tr>");
         k = 0;
         while (k < header_count) : (k += 1) {
             try writeAll(output, "<th");
-            const col_align = parser.table_alignments[k];
-            switch (col_align) {
-                .left => try writeAll(output, " style=\"text-align:left\""),
-                .center => try writeAll(output, " style=\"text-align:center\""),
-                .right => try writeAll(output, " style=\"text-align:right\""),
-                .none => {},
-            }
+            writeTableAlignment(output, parser.table_alignments[k]) catch {};
             try writeAll(output, ">");
             try parser.parseInlineContent(header_cells[k], output);
             try writeAll(output, "</th>");
@@ -938,47 +909,7 @@ pub const OctomarkParser = struct {
             if (t == .blockquote) current_quote_level -= 1;
         }
 
-        // If line is empty or whitespace, we shouldn't open new quotes if they don't contain content?
-        // But quote_level is derived from `>`.
-        // The issue is my previous fix: I detect `>` in `switch`.
-        // But `quote_level` is calculated at top of `processSingleLine`.
-        // That loop `while (true) { ... trimmed[0] == '>' ... }` consumes `>`.
-        // `line_content` becomes empty.
-        // `quote_level` becomes 1 (for input `>`).
-        // Then I enter `while (current_quote_level < quote_level)`. I output `<blockquote>`.
-        // Then `line_content` is empty.
-        // `processParagraph` sees empty and returns (my previous empty fix).
-        // So I get `<blockquote>` but no closing? No, `renderAndCloseTopBlock` at end of parse closes it.
-        // `finish` calls `renderAndCloseTopBlock`.
-        // So `> ` -> `<blockquote>\n</blockquote>`.
-        // User wants "completely no output".
-        // If `line_content` is empty AND `quote_level > 0` AND we are just opening it?
-
-        // Actually, if `line_content` is effectively empty, `processSingleLine` should maybe abort if it's just `>`.
-        // But `processSingleLine` handles blocks.
-        // If I skip opening blockquotes if content is empty?
-        // But `> \n > ` is valid nesting.
-        // The instruction 1.8 says `>` -> empty output.
-        // If I prevent opening blockquotes if content is empty, what about `> > A`?
-        // `quote_level`=2. content="A". OK.
-        // `> `? quote_level=1. content="".
-        // If I don't open, I output nothing.
-        // But what if previous line was `> A`? Then `current_quote_level` is 1. `quote_level` is 1. Match.
-        // Content empty. `processParagraph` returns.
-        // Result: `<blockquote><p>A</p>\n` ... and then nothing for `>`.
-        // `finish` closes `</blockquote>`.
-        // So `> A\n>` -> `<blockquote><p>A</p>\n</blockquote>`.
-        // This seems correct for "empty quote line".
-        // But for `>` (input only `>`), `current`=0. `quote`=1.
-        // If I suppress opening, I get nothing.
-
-        if (line_content.len == 0 and quote_level > current_quote_level) {
-            // We have pending quotes to open, but no content.
-            // If we open them, we get empty blockquote.
-            // If we don't, we effectively ignore the `>`.
-            // Requirement 1.8 says ignore.
-            return false;
-        }
+        if (line_content.len == 0 and quote_level > current_quote_level) return false;
 
         while (current_quote_level < quote_level) {
             try parser.closeParagraphIfOpen(output);
@@ -1005,83 +936,39 @@ pub const OctomarkParser = struct {
                 '_' => if (try parser.parseHorizontalRule(line_content, output)) return false,
                 '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return true,
                 '<' => {
-                    // Check for HTML block start condition
-                    // Type 6: <div ... > or </div> etc.
-                    // Simplified check: starts with < and matches block tag name.
-                    // Block tags: address, article, aside, base, basefont, blockquote, body, caption, center, col, colgroup, dd, details, dialog, dir, div, dl, dt, fieldset, figcaption, figure, footer, form, frame, frameset, h1, h2, h3, h4, h5, h6, head, header, hr, html, iframe, legend, li, link, main, menu, menuitem, meta, nav, noframes, ol, optgroup, option, p, param, section, source, summary, table, tbody, td, tfoot, th, thead, title, tr, track, ul
-                    // And special cases like <pre>, <script>, <style>, <!-- -->
-
-                    // For now, implementing basic check for <div> and maybe others if needed. The test uses <div>.
-                    // The prompt says "HTML block ... <p>の子要素にしてはならない".
-
-                    var tag_name_len: usize = 0;
-                    var i: usize = 1;
-                    if (i < line_content.len and line_content[i] == '/') i += 1;
-                    while (i < line_content.len and std.ascii.isAlphanumeric(line_content[i])) : (i += 1) {
-                        tag_name_len += 1;
+                    const tags = [_][]const u8{ "div", "pre", "table", "p" };
+                    var is_html_block = false;
+                    for (tags) |tag| {
+                        if (std.mem.startsWith(u8, line_content, "<") and (std.mem.indexOf(u8, line_content, tag) == 1)) {
+                            is_html_block = true;
+                            break;
+                        }
                     }
-                    // For <div, tag_name is "div".
-                    // Just basic heuristic for now: if we see a block tag, treat line as raw.
-                    // But wait, <http://...> starts with < too.
-                    // Block tags usually don't have : immediately.
-
-                    if (std.mem.startsWith(u8, line_content, "<div>") or std.mem.startsWith(u8, line_content, "</div>") or
-                        std.mem.startsWith(u8, line_content, "<pre>") or std.mem.startsWith(u8, line_content, "</pre>") or
-                        std.mem.startsWith(u8, line_content, "<table>") or std.mem.startsWith(u8, line_content, "</table>") or
-                        std.mem.startsWith(u8, line_content, "<p>") or std.mem.startsWith(u8, line_content, "</p>"))
-                    {
-
-                        // It is an HTML block line.
+                    if (is_html_block) {
                         try parser.renderAndCloseTopBlock(output);
-                        // Output raw line
                         try writeAll(output, line_content);
                         try writeByte(output, '\n');
                         return true;
                     }
                 },
                 '>' => {
-                    var content = line_content;
-                    var q_count: usize = 0;
+                    var q_cnt: usize = 0;
                     while (true) {
-                        const t = std.mem.trimLeft(u8, content, " ");
+                        const t = std.mem.trimLeft(u8, line_content, " ");
                         if (t.len > 0 and t[0] == '>') {
-                            q_count += 1;
-                            content = t[1..];
-                            if (content.len > 0 and content[0] == ' ') content = content[1..];
-                        } else {
-                            break;
-                        }
+                            q_cnt += 1;
+                            line_content = t[1..];
+                            if (line_content.len > 0 and line_content[0] == ' ') line_content = line_content[1..];
+                        } else break;
                     }
-
-                    if (q_count > 0) {
-                        // Check if content is empty or blank
-                        const trimmed_content = std.mem.trim(u8, content, &std.ascii.whitespace);
-                        if (trimmed_content.len == 0) {
-                            // Empty quote line.
-                            // Requirement 1.8: No HTML output.
-                            // But usually `>` outputs `<blockquote>\n</blockquote>`.
-                            // Prompt 1.8: "以下の入力に対し，**HTML 要素を生成してはならない** ... 完全に無出力".
-                            // If I output nothing, then I don't start a blockquote.
-                            // If there is existing blockquote context, I might need to maintain it.
-                            // But 1.8 implies `>` on a line alone -> no output.
-                            // If input is:
-                            // > A
-                            // >
-                            // > B
-                            // The middle `>` is lazy continuation or blank line in blockquote.
-                            // If I ignore it, it might break structure.
-                            // But prompt 1.8 examples are single line inputs.
-                            // If I simply return true (skip line) without doing anything?
-                            return true;
-                        }
-
+                    if (q_cnt > 0) {
+                        if (std.mem.trim(u8, line_content, &std.ascii.whitespace).len == 0) return true;
                         try parser.closeParagraphIfOpen(output);
                         var k: usize = 0;
-                        while (k < q_count) : (k += 1) {
+                        while (k < q_cnt) : (k += 1) {
                             try writeAll(output, "<blockquote>");
                             try parser.pushBlock(.blockquote, 0);
                         }
-                        line_content = content;
                     }
                 },
                 else => {},
@@ -1120,6 +1007,14 @@ pub const OctomarkParser = struct {
             }
         }
         return (all_valid and has_dash);
+    }
+    fn writeTableAlignment(output: anytype, align_type: TableAlignment) !void {
+        try switch (align_type) {
+            .left => writeAll(output, " style=\"text-align:left\""),
+            .center => writeAll(output, " style=\"text-align:center\""),
+            .right => writeAll(output, " style=\"text-align:right\""),
+            .none => {},
+        };
     }
 };
 
