@@ -393,11 +393,18 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.renderAndCloseTopBlock, _s);
         if (parser.stack_depth == 0) return;
         const block_type = parser.block_stack[parser.stack_depth - 1].block_type;
+        if (block_type == .paragraph and parser.paragraph_content.items.len == 0) {
+            parser.popBlock();
+            return;
+        }
         if (block_type == .indented_code) {
             parser.pending_code_blank_lines.clearRetainingCapacity();
         }
 
         if (parser.paragraph_content.items.len > 0) {
+            if (block_type == .paragraph) {
+                try writeAll(output, "<p>");
+            }
             try parser.parseInlineContent(parser.paragraph_content.items, output);
             parser.paragraph_content.clearRetainingCapacity();
         }
@@ -417,6 +424,10 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.tryCloseLeafBlock, _s);
 
         const bt = parser.currentBlockType() orelse return;
+        if (bt == .paragraph) {
+            try parser.renderAndCloseTopBlock(output);
+            return;
+        }
         if (@intFromEnum(bt) >= @intFromEnum(BlockType.code)) {
             try parser.renderAndCloseTopBlock(output);
         } else if (parser.paragraph_content.items.len > 0) {
@@ -1108,11 +1119,13 @@ pub const OctomarkParser = struct {
 
         if (content.len >= 3 and (std.mem.eql(u8, content[0..3], "```") or std.mem.eql(u8, content[0..3], "~~~"))) {
             const block_type = parser.currentBlockType();
-            if (parser.paragraph_content.items.len > 0) {
+            if (block_type == .paragraph) {
+                try parser.renderAndCloseTopBlock(output);
+            } else if (parser.paragraph_content.items.len > 0) {
                 try parser.parseInlineContent(parser.paragraph_content.items, output);
                 parser.paragraph_content.clearRetainingCapacity();
             }
-            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+            if (block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderAndCloseTopBlock(output);
             }
             try writeAll(output, "<pre><code");
@@ -1183,6 +1196,7 @@ pub const OctomarkParser = struct {
                 var hash_end = end;
                 while (hash_end > content_start and line_content[hash_end - 1] == '#') : (hash_end -= 1) {}
                 if (hash_end < end) {
+                    if (hash_end == content_start) end = content_start;
                     var space_end = hash_end;
                     while (space_end > content_start and (line_content[space_end - 1] == ' ' or line_content[space_end - 1] == '\t')) : (space_end -= 1) {}
                     if (space_end < hash_end) end = space_end;
@@ -1508,7 +1522,6 @@ pub const OctomarkParser = struct {
         }
 
         if (parser.currentBlockType() != .paragraph and (!in_container or list_loose)) {
-            try writeAll(output, "<p>");
             try parser.pushBlock(.paragraph, 0);
         } else if (parser.currentBlockType() == .paragraph or (in_container and !is_list and !is_dl and !list_loose)) {
             try parser.paragraph_content.append(parser.allocator, '\n');
@@ -1606,8 +1619,12 @@ pub const OctomarkParser = struct {
             if (entry.block_type == .blockquote) current_quote_level += 1;
         }
 
+        var is_lazy_continuation = false;
         if (quote_level < current_quote_level and (parser.currentBlockType() == .paragraph or parser.currentBlockType() == .unordered_list or parser.currentBlockType() == .ordered_list or parser.currentBlockType() == .blockquote)) {
-            if (!parser.isBlockStartMarker(line_content, leading_spaces)) quote_level = current_quote_level;
+            if (!parser.isBlockStartMarker(line_content, leading_spaces)) {
+                quote_level = current_quote_level;
+                is_lazy_continuation = true;
+            }
         }
 
         while (current_quote_level > quote_level) {
@@ -1619,11 +1636,12 @@ pub const OctomarkParser = struct {
         if (line_content.len == 0 and quote_level > current_quote_level) return false;
 
         while (current_quote_level < quote_level) {
-            if (parser.paragraph_content.items.len > 0) {
+            if (parser.currentBlockType() == .paragraph) {
+                try parser.closeParagraphIfOpen(output);
+            } else if (parser.paragraph_content.items.len > 0) {
                 try parser.parseInlineContent(parser.paragraph_content.items, output);
                 parser.paragraph_content.clearRetainingCapacity();
             }
-            try parser.closeParagraphIfOpen(output);
             try writeAll(output, "<blockquote>");
             try parser.pushBlock(.blockquote, 0);
             current_quote_level += 1;
@@ -1640,6 +1658,59 @@ pub const OctomarkParser = struct {
         }
 
         if (line_content.len > 0) {
+            if (leading_spaces <= 3 and isThematicBreakLine(line_content)) {
+                if (parser.stack_depth > 0) {
+                    var list_indent: ?i32 = null;
+                    var i: usize = parser.stack_depth;
+                    while (i > 0) {
+                        i -= 1;
+                        const entry = parser.block_stack[i];
+                        if (entry.block_type == .unordered_list or entry.block_type == .ordered_list) {
+                            list_indent = entry.content_indent;
+                            break;
+                        }
+                    }
+                    if (list_indent) |list_content_indent| {
+                        if (leading_spaces < @as(usize, @intCast(list_content_indent))) {
+                            try parser.closeParagraphIfOpen(output);
+                            while (parser.currentBlockType() == .unordered_list or parser.currentBlockType() == .ordered_list) {
+                                try parser.renderAndCloseTopBlock(output);
+                            }
+                        }
+                    }
+                }
+            }
+            if (!is_lazy_continuation and parser.currentBlockType() == .paragraph and leading_spaces <= 3) {
+                var start: usize = 0;
+                while (start < line_content.len and (line_content[start] == ' ' or line_content[start] == '\t')) : (start += 1) {}
+                var end: usize = line_content.len;
+                while (end > start and (line_content[end - 1] == ' ' or line_content[end - 1] == '\t')) : (end -= 1) {}
+                if (start < end) {
+                    const marker = line_content[start];
+                    if (marker == '=' or marker == '-') {
+                        var i: usize = start;
+                        while (i < end) : (i += 1) {
+                            if (line_content[i] != marker) break;
+                        }
+                        if (i == end) {
+                            const trimmed = std.mem.trim(u8, parser.paragraph_content.items, " \t\n");
+                            if (trimmed.len > 0) {
+                                parser.paragraph_content.clearRetainingCapacity();
+                                parser.popBlock();
+                                const level_char: u8 = if (marker == '=') '1' else '2';
+                                try writeAll(output, "<h");
+                                try writeByte(output, level_char);
+                                try writeAll(output, ">");
+                                try parser.parseInlineContent(trimmed, output);
+                                try writeAll(output, "</h");
+                                try writeByte(output, level_char);
+                                try writeAll(output, ">\n");
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
             switch (line_content[0]) {
                 '#' => if (try parser.parseHeader(line_content, leading_spaces, output)) return false,
                 '`', '~' => if (try parser.parseFencedCodeBlock(line_content, leading_spaces, output)) return false,
