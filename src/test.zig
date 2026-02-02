@@ -111,6 +111,43 @@ test "NestingTooDeep" {
 
 // Table Column Limit test removed - table auto-detection no longer supported (simplification #1)
 
+test "mandatory fixes" {
+    const cases = [_]TestCase{
+        tc("2.1 ATX No Space", "#Header", "<h1>Header</h1>\n", false),
+        tc("2.1 ATX Empty", "#", "<h1></h1>\n", false),
+        tc("2.2 List Star", "* A", "<ul>\n<li>A</li>\n</ul>\n", false),
+        tc("2.2 List Plus", "+ A", "<ul>\n<li>A</li>\n</ul>\n", false),
+        tc("2.3 Tilde Fence", "~~~\nA\n~~~", "<pre><code>A\n</code></pre>\n", false),
+        tc("2.4 Inline Code Empty", " `` ", "<p>`` </p>\n", false), // Input " `` " has space at end. Output should preserve it if not code.
+        // Wait, " `` " is 4 chars: space, backtick, backtick, space.
+        // If the instruction implies ` `` ` as input, it means empty code span?
+        // Standard CommonMark: `` ` `` -> <code> </code>? No.
+        // If input is " `` ", it's just text.
+        // The prompt says: "以下を **コードスパンとして解釈してはならない**。 `` ".
+        // And "opening delimiter と closing delimiter が成立しない場合... 通常テキスト".
+        // My interpretation: The input ` `` ` (two backticks) should NOT be parsed as empty inline code.
+        // So output should be <p>``</p>.
+        tc("2.4 Inline Code Unmatched", "``", "<p>``</p>\n", false),
+        tc("2.5 Angle Autolink", "<http://a.b>", "<p><a href=\"http://a.b\">http://a.b</a></p>\n", false), // Should not escape <
+        // Note: The prompt says output `<a href="...">...</a>`. My parser wraps in <p> for inline content.
+        // I will assume the paragraph wrapper is correct for inline content unless strictly forbidden.
+        // 1.6 says "HTML block ... <p>の子要素にしてはならない". Autolink is inline.
+
+        tc("2.6 HTML Block Div", "<div>A</div>", "<div>A</div>\n", true),
+        tc("2.6 HTML Block Content", "<div>**A**</div>", "<div>**A**</div>\n", true),
+
+        tc("2.7 Empty Quote", ">", "", false),
+        tc("2.7 Empty List", "- ", "", false),
+    };
+
+    const allocator = std.testing.allocator;
+    for (cases) |case| {
+        const output = try render(allocator, case.input, case.enable_html);
+        defer allocator.free(output);
+        try std.testing.expectEqualStrings(case.expected, output);
+    }
+}
+
 test "comprehensive cases" {
     const cases = [_]TestCase{
         tc("Header 1", "# H1", "<h1>H1</h1>\n", false),
@@ -120,22 +157,22 @@ test "comprehensive cases" {
         tc("Header 5", "##### H5", "<h5>H5</h5>\n", false),
         tc("Header 6", "###### H6", "<h6>H6</h6>\n", false),
         tc("Invalid Header 7", "####### H7", "<p>####### H7</p>\n", false),
-        tc("Invalid Header No Space", "#Header", "<p>#Header</p>\n", false),
+        tc("Invalid Header No Space", "#Header", "<h1>Header</h1>\n", false),
         tc("Header with Bold", "# **Bold**", "<h1><strong>Bold</strong></h1>\n", false),
         tc("Header with Code", "## `Code`", "<h2><code>Code</code></h2>\n", false),
         tc("Header with Link", "### [Link](url)", "<h3><a href=\"url\">Link</a></h3>\n", false),
         tc("List Ordered Start 1", "1. Item", "<ol>\n<li>Item</li>\n</ol>\n", false),
         tc("List Ordered Start 0", "0. Item", "<ol>\n<li>Item</li>\n</ol>\n", false),
-        tc("List Unordered Star", "* Item", "<p>* Item</p>\n", false),
+        tc("List Unordered Star", "* Item", "<ul>\n<li>Item</li>\n</ul>\n", false),
         tc("List Unordered Dash", "- Item", "<ul>\n<li>Item</li>\n</ul>\n", false),
-        tc("List Unordered Plus", "+ Item", "<p>+ Item</p>\n", false),
+        tc("List Unordered Plus", "+ Item", "<ul>\n<li>Item</li>\n</ul>\n", false),
         tc("List Nested 3 Levels", "- 1\n  - 2\n    - 3", "<ul>\n<li>1<ul>\n<li>2<ul>\n<li>3</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n", false),
         tc("List Mixed Nesting", "- 1\n  1. 2", "<ul>\n<li>1<ol>\n<li>2</li>\n</ol>\n</li>\n</ul>\n", false),
         tc("Task List Checked", "- [x] Done", "<ul>\n<li><input type=\"checkbox\" checked disabled> Done</li>\n</ul>\n", false),
         tc("Task List Unchecked", "- [ ] Todo", "<ul>\n<li><input type=\"checkbox\"  disabled> Todo</li>\n</ul>\n", false),
         tc("Task List Invalid", "- [o] Invalid", "<ul>\n<li>[o] Invalid</li>\n</ul>\n", false),
         tc("Code Block Fenced Backtick", "```\ncode\n```", "<pre><code>code\n</code></pre>\n", false),
-        tc("Code Block Fenced Tilde", "~~~\ncode\n~~~", "<p>~~~\ncode\n~~~</p>\n", false),
+        tc("Code Block Fenced Tilde", "~~~\ncode\n~~~", "<pre><code>code\n</code></pre>\n", false),
         tc("Code Block With Info", "```rust\nfn main() {}\n```", "<pre><code class=\"language-rust\">fn main() {}\n</code></pre>\n", false),
         tc("Blockquote Simple", "> Quote", "<blockquote><p>Quote</p>\n</blockquote>\n", false),
         tc("Blockquote Nested", "> > Quote", "<blockquote><blockquote><p>Quote</p>\n</blockquote>\n</blockquote>\n", false),
@@ -162,7 +199,7 @@ test "comprehensive cases" {
         tc("HR Star", "***", "<hr>\n", false),
         tc("HR Underscore", "___", "<hr>\n", false),
         tc("Escaped Asterisk", "\\*", "<p>*</p>\n", false),
-        tc("HTML Pass", "<div>Content</div>", "<p><div>Content</div></p>\n", true),
+        tc("HTML Pass", "<div>Content</div>", "<div>Content</div>\n", true),
         tc("Empty Input", "", "", false),
         tc("Whitespace Input", "   ", "", false),
         // Additional Nesting Cases
@@ -210,7 +247,7 @@ test "comprehensive cases" {
         tc("Code with Escapes", "`\\`code`", "<p><code>\\</code>code`</p>\n", false),
         tc("Math with Escapes", "$\\$E$", "<p><span class=\"math\">\\$E</span></p>\n", false),
         tc("Table with Pipe Escape", "| \\| |\n|---|\n| V |", "<table><thead><tr><th>|</th></tr></thead><tbody>\n<tr><td>V</td></tr>\n</tbody></table>\n", false),
-        tc("HTML in List", "- <div>H</div>", "<ul>\n<li><div>H</div></li>\n</ul>\n", true),
+        tc("HTML in List", "- <div>H</div>", "<ul>\n<li></li>\n</ul>\n<div>H</div>\n", true), // HTML Block breaks out of list
         tc("HTML in Quote", "> <span>S</span>", "<blockquote><p><span>S</span></p>\n</blockquote>\n", true),
         tc("HTML in Header", "# <i>I</i>", "<h1><i>I</i></h1>\n", true),
         tc("Complex 1", "> - **B**", "<blockquote><ul>\n<li><strong>B</strong></li>\n</ul>\n</blockquote>\n", false),
@@ -245,15 +282,15 @@ test "comprehensive cases" {
         tc("Deep Quote 1", "> > > > > 5", "<blockquote><blockquote><blockquote><blockquote><blockquote><p>5</p>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n", false),
         tc("Deep List 1", "- 1\n  - 2\n    - 3\n      - 4\n        - 5\n          - 6", "<ul>\n<li>1<ul>\n<li>2<ul>\n<li>3<ul>\n<li>4<ul>\n<li>5<ul>\n<li>6</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n", false),
         tc("Deep Ordered 1", "1. 1\n   1. 2\n      1. 3\n         1. 4", "<ol>\n<li>1<ol>\n<li>2<ol>\n<li>3<ol>\n<li>4</li>\n</ol>\n</li>\n</ol>\n</li>\n</ol>\n</li>\n</ol>\n", false),
-        tc("Edge Empty Header", "#", "<p>#</p>\n", false), // According to spec, usually needs space. Octomark parser seems to require space.
+        tc("Edge Empty Header", "#", "<h1></h1>\n", false),
         tc("Edge Header Space", "# ", "<h1></h1>\n", false),
         tc("Edge Empty List", "-", "<p>-</p>\n", false), // Needs space
-        tc("Edge List Space", "- ", "<ul>\n<li></li>\n</ul>\n", false),
-        tc("Edge Empty Quote", ">", "<blockquote></blockquote>\n", false),
-        tc("Edge Quote Space", "> ", "<blockquote></blockquote>\n", false),
+        tc("Edge List Space", "- ", "", false),
+        tc("Edge Empty Quote", ">", "", false),
+        tc("Edge Quote Space", "> ", "", false),
         tc("Edge Empty Link", "[]()", "<p><a href=\"\"></a></p>\n", false),
         tc("Edge Empty Image", "![]()", "<p><img src=\"\" alt=\"\"></p>\n", false),
-        tc("Edge Empty Code", "``", "<p><code></code></p>\n", false),
+        tc("Edge Empty Code", "``", "<p>``</p>\n", false),
         tc("Edge Empty Math", "$$", "<div class=\"math\">\n</div>\n", false),
         tc("Edge Empty Block Math", "$$\n$$", "<div class=\"math\">\n</div>\n", false),
         tc("Edge Empty Fenced", "```\n```", "<pre><code></code></pre>\n", false),
@@ -284,7 +321,7 @@ test "comprehensive cases" {
         tc("Auto 3", "http://a.b/c", "<p><a href=\"http://a.b/c\">http://a.b/c</a></p>\n", false),
         tc("Auto 4", "https://a.b/c?d=e", "<p><a href=\"https://a.b/c?d=e\">https://a.b/c?d=e</a></p>\n", false),
         tc("Auto 5", "(http://a.b)", "<p>(<a href=\"http://a.b\">http://a.b</a>)</p>\n", false),
-        tc("Auto 6", "<http://a.b>", "<p>&lt;<a href=\"http://a.b\">http://a.b</a>&gt;</p>\n", false),
+        tc("Auto 6", "<http://a.b>", "<p><a href=\"http://a.b\">http://a.b</a></p>\n", false),
         tc("Escape 1", "\\\\", "<p>\\</p>\n", false),
         tc("Escape 2", "\\`", "<p>`</p>\n", false),
         tc("Escape 3", "\\*", "<p>*</p>\n", false),

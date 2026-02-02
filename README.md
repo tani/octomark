@@ -36,8 +36,8 @@ Recent run (EXAMPLE.md on this machine, ReleaseFast):
 
 OctoMark supports GFM-like Markdown with extensions:
 
-- **Block Elements**: Headers, Lists (Ordered/Unordered), Blockquotes, Fenced Code Blocks, Tables, Horizontal Rules, Task Lists, Definition Lists.
-- **Inline Elements**: Bold (`**strong**`), Italic (`_em_`), Strikethrough, Inline Code, Links, Images, Autolinks, Hard Line Breaks (two trailing spaces).
+- **Block Elements**: Headers (ATX), Lists (Ordered/Unordered `*` `+` `-`), Blockquotes, Fenced Code Blocks (`` ``` `` and `~~~`), Tables, Horizontal Rules, Task Lists, Definition Lists, HTML Blocks.
+- **Inline Elements**: Bold (`**strong**`), Italic (`_em_`), Strikethrough, Inline Code, Links, Images, Autolinks (URL, email, and `<url>`), Hard Line Breaks (two trailing spaces).
 - **Extensions**: Math support (Block `$$` and Inline `$`).
 
 ## Getting Started
