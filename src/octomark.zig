@@ -36,12 +36,7 @@ pub const OctomarkOptions = struct {
     enable_html: bool = false,
 };
 
-const is_special_char = blk: {
-    var s: [256]bool = [_]bool{false} ** 256;
-    const special = "\\['*`&<>\"'_~!$h";
-    for (special) |ch| s[ch] = true;
-    break :blk s;
-};
+const special_chars = "\\['*`&<>\"'_~!$h";
 
 const html_escape_map = blk: {
     var map: [256]?[]const u8 = [_]?[]const u8{null} ** 256;
@@ -182,23 +177,11 @@ pub const OctomarkParser = struct {
     }
 
     fn findNextSpecial(text: []const u8, start: usize) usize {
-        var i = start;
-        while (i + 8 <= text.len) {
-            const b0 = text[i];
-            const b1 = text[i + 1];
-            const b2 = text[i + 2];
-            const b3 = text[i + 3];
-            const b4 = text[i + 4];
-            const b5 = text[i + 5];
-            const b6 = text[i + 6];
-            const b7 = text[i + 7];
-            if (is_special_char[b0] or is_special_char[b1] or is_special_char[b2] or is_special_char[b3] or is_special_char[b4] or is_special_char[b5] or is_special_char[b6] or is_special_char[b7]) {
-                break;
-            }
-            i += 8;
+        if (start >= text.len) return text.len;
+        if (std.mem.indexOfAny(u8, text[start..], special_chars)) |offset| {
+            return start + offset;
         }
-        while (i < text.len and !is_special_char[text[i]]) : (i += 1) {}
-        return i;
+        return text.len;
     }
 
     fn parseInlineContent(parser: *OctomarkParser, text: []const u8, output: anytype) !void {
