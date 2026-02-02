@@ -65,13 +65,6 @@ const html_escape_map = blk: {
     break :blk map;
 };
 
-const special_chars_lut = blk: {
-    var lut: [256]bool = [_]bool{false} ** 256;
-    for (special_chars) |c| {
-        lut[c] = true;
-    }
-    break :blk lut;
-};
 
 pub const OctomarkParser = struct {
     table_alignments: [64]TableAlignment = [_]TableAlignment{TableAlignment.none} ** 64,
@@ -142,7 +135,6 @@ pub const OctomarkParser = struct {
         scanDelimiters: Counter = .{},
         scanInline: Counter = .{},
         renderInline: Counter = .{},
-        processEmphasis: Counter = .{},
         parseIndentedCodeBlock: Counter = .{},
         processLeafBlockContinuation: Counter = .{},
         processParagraph: Counter = .{},
@@ -371,11 +363,6 @@ pub const OctomarkParser = struct {
     }
 
     fn isAsciiPunctuation(c: u8) bool {
-        // Since isAsciiPunctuation is a pure function and doesn't take parser,
-        // we can't easily profile it without changing signature or using global state.
-        // However, the user asked for "each function".
-        // But the function is static/pure. It's called from many places.
-        // I'll skip it for now as it doesn't take parser.
         return switch (c) {
             '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', ':', ';', '<', '=', '>', '?', '@', '[', '\\', ']', '^', '_', '`', '{', '|', '}', '~' => true,
             else => false,
@@ -415,14 +402,6 @@ pub const OctomarkParser = struct {
             return;
         }
         try parser.renderInline(text, parser.replacements.items, output, depth, global_offset);
-    }
-
-    fn computePadding(text: []const u8, start: usize) usize {
-        // This fails because it doesn't take parser. I should check if I can add parser or skip.
-        // Given it is a helper, I'll skip.
-        var i: usize = start;
-        while (i < text.len and text[i] == ' ') : (i += 1) {}
-        return i - start;
     }
 
     fn scanDelimiters(parser: *OctomarkParser, text: []const u8, start_pos: usize, delimiter_char: u8, stack_bottom: usize) !usize {
@@ -475,35 +454,15 @@ pub const OctomarkParser = struct {
                     num_delims -= use_delims;
 
                     if (opener.count == 0) {
-                        // Remove opener from stack (mark inactive effectively, or shift?)
-                        // Since we scan linearly, we can just mark inactive or shift.
-                        // Shift is better to keep stack clean?
-                        // Array removal is O(N). Stack depth is small.
-                        // Better: remove this and all later. No.
-                        // Just decrement length if it's top?
                         if (stack_idx == parser.delimiter_stack_len - 1) {
                             parser.delimiter_stack_len -= 1;
                         } else {
-                            // Swap remove? No order matters.
-                            // Shift.
                             std.mem.copyForwards(Delimiter, parser.delimiter_stack[stack_idx .. parser.delimiter_stack_len - 1], parser.delimiter_stack[stack_idx + 1 .. parser.delimiter_stack_len]);
                             parser.delimiter_stack_len -= 1;
                         }
                     }
 
                     if (num_delims == 0) break;
-                    // Continue matching with remaining closers? No, CommonMark says we continue loop if we have delims left.
-                    // But we just consumed some.
-                    // We continue the stack loop?
-                    // "If the delimiter found was a closer... look back... if found... remove... if the closer is not exhausted, continue looking back."
-                    // So yes, we continue the while(stack_idx) loop.
-                    // BUT we must adjust stack_idx because we removed an item!
-                    // If we removed item at stack_idx, next iter should convert to stack_idx - 1 (but we already decremented? No loop decrements at start).
-                    // Loop does stack_idx -= 1. matching `opener`.
-                    // If we shift, the item at stack_idx is now the *next* item (which was at idx+1).
-                    // But we are iterating BACKWARDS.
-                    // Items at < stack_idx are unaffected.
-                    // So we don't need to adjust stack_idx for next iteration (which goes to stack_idx - 1).
                     continue;
                 }
             }
@@ -534,52 +493,9 @@ pub const OctomarkParser = struct {
         var i: usize = 0;
         const len = text.len;
 
-        while (i + 8 <= len) {
-            blk: {
-                inline for (0..8) |offset| {
-                    const idx = i + offset;
-                    const c = text[idx];
-                    switch (c) {
-                        '*', '_' => {
-                            const next_pos = try parser.scanDelimiters(text, idx, c, stack_bottom);
-                            i = next_pos;
-                            break :blk;
-                        },
-                        '`' => {
-                            var backtick_count: usize = 1;
-                            var k = idx + 1;
-                            while (k < len and text[k] == '`') : (k += 1) {
-                                backtick_count += 1;
-                            }
-                            if (std.mem.indexOf(u8, text[idx + backtick_count ..], text[idx .. idx + backtick_count])) |match_offset| {
-                                i = idx + backtick_count + match_offset + backtick_count;
-                            } else {
-                                i = idx + backtick_count;
-                            }
-                            break :blk;
-                        },
-                        '<' => {
-                            const tag_len = parser.parseHtmlTag(text[idx..]);
-                            if (tag_len > 0) {
-                                i = idx + tag_len;
-                            } else {
-                                i = idx + 1;
-                            }
-                            break :blk;
-                        },
-                        '\\' => {
-                            i = idx + 2;
-                            break :blk;
-                        },
-                        else => {},
-                    }
-                }
-                // If we reached here (no break), we processed 8 chars successfully without special handling
-                i += 8;
-            }
-        }
-
         while (i < len) {
+            const offset = std.mem.indexOfAny(u8, text[i..], "*_`<\\") orelse break;
+            i += offset;
             const c = text[i];
             switch (c) {
                 '*', '_' => {
@@ -948,13 +864,6 @@ pub const OctomarkParser = struct {
         }
     }
 
-    fn processEmphasis(parser: *OctomarkParser, stack_bottom: usize) void {
-        const _s = parser.startCall(.processEmphasis);
-        defer parser.endCall(.processEmphasis, _s);
-
-        parser.delimiter_stack_len = stack_bottom;
-    }
-
     fn decodeEntity(inner: []const u8) ?[]const u8 {
         if (inner.len < 2) return null;
         switch (inner[0]) {
@@ -1059,7 +968,6 @@ pub const OctomarkParser = struct {
         }
 
         if (content.len >= 3 and (std.mem.eql(u8, content[0..3], "```") or std.mem.eql(u8, content[0..3], "~~~"))) {
-            const fence_char = content[0];
             const block_type = parser.currentBlockType();
             if (parser.paragraph_content.items.len > 0) {
                 try parser.parseInlineContent(parser.paragraph_content.items, output);
@@ -1071,12 +979,7 @@ pub const OctomarkParser = struct {
             try writeAll(output, "<pre><code");
             var lang_len: usize = 0;
             while (3 + lang_len < content.len and !std.ascii.isWhitespace(content[3 + lang_len])) : (lang_len += 1) {}
-            if (lang_len > 0 and fence_char == '`') {
-                try writeAll(output, " class=\"language-");
-                try parser.appendEscapedText(content[3 .. 3 + lang_len], output);
-                try writeAll(output, "\"");
-            } else if (lang_len > 0 and fence_char == '~') {
-                // If the user wants info strings on tildes supported (standard GFM)
+            if (lang_len > 0) {
                 try writeAll(output, " class=\"language-");
                 try parser.appendEscapedText(content[3 .. 3 + lang_len], output);
                 try writeAll(output, "\"");
@@ -1747,7 +1650,6 @@ pub const OctomarkParser = struct {
     }
 
     fn writeTableAlignment(output: anytype, align_type: TableAlignment) !void {
-        // Helper without parser, skipping
         try switch (align_type) {
             .left => writeAll(output, " style=\"text-align:left\""),
             .center => writeAll(output, " style=\"text-align:center\""),
