@@ -10,7 +10,7 @@ This skill focuses on radical LOC reduction through "The Big Flattening." By rem
 ## Core Principles
 
 1. **Linear over Nested**: Favor linear, "naive" code paths. Shallow logic is easier for both the developer to count and the CPU to predict.
-2. **Absolute LOC Minimization**: Use compact Zig idioms (inline if/switch) to keep the logic high-density.
+2. **Absolute LOC Minimization**: Use compact Zig idioms (inline if/switch) to keep the logic high-density but keep the code readable.
 3. **Reasonable Naming**: Use descriptive names (3+ chars) to maintain mental mapping while the structure collapses.
 4. **No Private Abstractions**: Structs, enums, and helpers are overhead. Inline them to eliminate indirect calls (vtable/interface lookups) that trip up branch predictors.
 5. **Standard Library First**: Use `std` primitives. They are well-tested and often more "naive" and direct than complex custom wrappers.

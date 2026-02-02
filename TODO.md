@@ -1,9 +1,16 @@
-- [x] Tabs/indentation: implement CommonMark tab expansion (4-space stops) during line scan; keep a single pass over each line.
-- [x] Thematic breaks & headings: tighten rules for ATX/Setext and thematic breaks (indent limits, trailing hash trimming, thematic break vs list item) with linear scans only.
-- [x] Backslash escapes: treat only punctuation escapes; otherwise emit backslash literally; still a single pass over inline text.
-- [ ] Entity decoding: support numeric entities (decimal/hex) and a small fixed table for named entities in O(1) lookups; avoid regex.
-- [ ] Link/image parsing: implement reference definitions (collect in one pass) and reference link resolution; parse destinations/titles with bounded linear scans.
-- [ ] Autolinks: enforce angle-bracket autolink rules (no spaces, scheme/email validation) with a linear scan for end `>`.
-- [ ] Inline emphasis: enforce delimiter rules more closely (left/right flanking, rule of 3) using the existing delimiter stack.
-- [ ] HTML blocks: classify HTML block types with fixed tag lists and state flags; avoid backtracking.
-- [ ] Hard line breaks: normalize handling of trailing spaces/backslash at line end in a single pass.
+- [x] Tabs/indentation: implement CommonMark tab expansion (4-space stops).
+- [x] Thematic breaks & headings: ATX/Setext and thematic breaks with linear scans.
+- [x] Backslash escapes: treat only punctuation escapes.
+- [x] Entity decoding: numeric and named entities in O(1).
+- [x] Autolinks: scheme/email validation.
+- [x] Inline emphasis: delimiter rules (flanking/rule of 3).
+- [x] HTML blocks: Type 1-6 classification.
+- [x] Hard line breaks: trailing spaces/backslash normalization.
+- [ ] List precision: refine tight/loose list detection to handle blank lines between nested items strictly.
+- [ ] Link robustness: support balanced parentheses in destinations `(url(nested))` and multi-line titles.
+- [ ] Unicode categories: expand `isPunct` and whitespace checks to support mandatory Unicode ranges via lookup tables.
+- [ ] HTML Block Type 7: detect generic HTML start/end tags as block-level markers (interrupting paragraphs).
+- [ ] GFM Task Lists: implement `[ ]` and `[x]` markers for list items.
+- [ ] GFM Strikethrough: fully integrate `~~` into the delimiter stack for spec-compliant nesting.
+- [ ] Image alt text parsing: ensure inline parsing is applied to image `alt` attributes.
+- [ ] Setext continuity: handle multi-line paragraph content preceding Setext underlines.

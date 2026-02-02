@@ -122,7 +122,12 @@ pub const OctomarkParser = struct {
     }
 
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
-        self.* = .{ .allocator = allocator, .paragraph_content = .{}, .pending_code_blank_lines = .{}, .replacements = .{} };
+        self.* = .{
+            .allocator = allocator,
+            .paragraph_content = .{},
+            .pending_code_blank_lines = .{},
+            .replacements = .{},
+        };
         if (builtin.mode == .Debug) self.timer = try std.time.Timer.start();
         self.pending_buffer = .{};
         try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
@@ -248,7 +253,9 @@ pub const OctomarkParser = struct {
     }
     fn tryCloseLeaf(p: *OctomarkParser, o: anytype) !void {
         const t = p.topT() orelse return;
-        if (t == .paragraph or @intFromEnum(t) >= @intFromEnum(BlockType.code)) try p.renderTop(o) else if (p.paragraph_content.items.len > 0) {
+        if (t == .paragraph or @intFromEnum(t) >= @intFromEnum(BlockType.code)) {
+            try p.renderTop(o);
+        } else if (p.paragraph_content.items.len > 0) {
             try p.parseInlineContent(p.paragraph_content.items, o);
             p.paragraph_content.clearRetainingCapacity();
         }
@@ -396,7 +403,11 @@ pub const OctomarkParser = struct {
                 continue;
             }
             if (next > i) {
-                try writeAll(o, text[i..next]);
+                var t_end = next;
+                if (next == text.len) while (t_end > i and text[t_end - 1] == ' ') {
+                    t_end -= 1;
+                };
+                if (t_end > i) try writeAll(o, text[i..t_end]);
                 i = next;
                 continue;
             }
@@ -551,31 +562,29 @@ pub const OctomarkParser = struct {
                                 var em_l = false;
                                 if (std.mem.indexOfScalar(u8, lc, ':')) |s_off| {
                                     const sch = lc[0..s_off];
-                                    var all_a = true;
-                                    for (sch) |sc| {
-                                        if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
-                                            all_a = false;
-                                            break;
+                                    var all_a = sch.len >= 2 and sch.len <= 32 and std.ascii.isAlphabetic(sch[0]);
+                                    if (all_a) {
+                                        for (sch[1..]) |sc| {
+                                            if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
+                                                all_a = false;
+                                                break;
+                                            }
                                         }
                                     }
-                                    if (all_a and sch.len >= 2) al = true;
-                                } else if (std.mem.indexOfScalar(u8, lc, '@')) |_| {
-                                    al = true;
-                                    em_l = true;
+                                    if (all_a) al = true;
+                                } else if (std.mem.indexOfScalar(u8, lc, '@')) |a_off| {
+                                    if (a_off > 0 and a_off < lc.len - 1 and std.mem.indexOfScalar(u8, lc[a_off + 1 ..], '.') != null) {
+                                        al = true;
+                                        em_l = true;
+                                    }
                                 }
-                                if (em_l and std.mem.indexOfScalar(u8, lc, '\\') != null) {
-                                    al = false;
-                                    em_l = false;
-                                }
+                                if (al and std.mem.indexOfAny(u8, lc, " \t\n\\") != null) al = false;
                                 if (al) {
                                     try writeAll(o, "<a href=\"");
                                     if (em_l) try writeAll(o, "mailto:");
-                                    for (lc) |ch| switch (ch) {
-                                        '\\' => try writeAll(o, "%5C"),
-                                        '[' => try writeAll(o, "%5B"),
-                                        ']' => try writeAll(o, "%5D"),
-                                        else => if (html_escape_map[ch]) |e| try writeAll(o, e) else try writeByte(o, ch),
-                                    };
+                                    for (lc) |ch| {
+                                        if (html_escape_map[ch]) |e| try writeAll(o, e) else try writeByte(o, ch);
+                                    }
                                     try writeAll(o, "\">");
                                     try p.esc(lc, o);
                                     try writeAll(o, "</a>");
@@ -617,34 +626,42 @@ pub const OctomarkParser = struct {
                 },
                 '&' => {
                     var j = i + 1;
+                    var decoded: [4]u8 = undefined;
+                    var decoded_len: usize = 0;
                     if (j < text.len and text[j] == '#') {
                         j += 1;
+                        var base: u8 = 10;
                         if (j < text.len and (text[j] == 'x' or text[j] == 'X')) {
+                            base = 16;
                             j += 1;
-                            while (j < text.len and std.ascii.isHex(text[j])) : (j += 1) {}
-                        } else while (j < text.len and std.ascii.isDigit(text[j])) : (j += 1) {}
-                        if (j > i + 2 and j < text.len and text[j] == ';') {
-                            try writeAll(o, text[i .. j + 1]);
-                            i = j + 1;
-                            h = true;
+                        }
+                        const start = j;
+                        while (j < text.len and (if (base == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1) {}
+                        if (j > start and j < text.len and text[j] == ';') {
+                            const cp = std.fmt.parseInt(u21, text[start..j], base) catch 0;
+                            if (cp > 0) decoded_len = std.unicode.utf8Encode(@intCast(cp), &decoded) catch 0;
+                            if (decoded_len > 0) {
+                                try p.esc(decoded[0..decoded_len], o);
+                                i = j + 1;
+                                h = true;
+                            }
                         }
                     } else {
                         while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
                         if (j > i + 1 and j < text.len and text[j] == ';') {
                             const en = text[i + 1 .. j];
-                            const dec = if (en.len < 2) null else switch (en[0]) {
-                                'a' => if (std.mem.eql(u8, en, "amp")) @as(?[]const u8, "&") else if (std.mem.eql(u8, en, "apos")) @as(?[]const u8, "'") else null,
-                                'l' => if (std.mem.eql(u8, en, "lt")) @as(?[]const u8, "<") else null,
-                                'g' => if (std.mem.eql(u8, en, "gt")) @as(?[]const u8, ">") else null,
-                                'q' => if (std.mem.eql(u8, en, "quot")) @as(?[]const u8, "\"") else null,
-                                'c' => if (std.mem.eql(u8, en, "copy")) @as(?[]const u8, "©") else null,
-                                'r' => if (std.mem.eql(u8, en, "reg")) @as(?[]const u8, "®") else null,
-                                'n' => if (std.mem.eql(u8, en, "nbsp")) @as(?[]const u8, "\u{00A0}") else null,
+                            const d_opt: ?[]const u8 = switch (en.len) {
+                                2 => if (std.mem.eql(u8, en, "lt")) "<" else if (std.mem.eql(u8, en, "gt")) ">" else null,
+                                3 => if (std.mem.eql(u8, en, "amp")) "&" else null,
+                                4 => if (std.mem.eql(u8, en, "quot")) "\"" else if (std.mem.eql(u8, en, "apos")) "'" else if (std.mem.eql(u8, en, "copy")) "©" else if (std.mem.eql(u8, en, "nbsp")) "\u{00A0}" else null,
+                                5 => if (std.mem.eql(u8, en, "ndash")) "–" else if (std.mem.eql(u8, en, "mdash")) "—" else null,
                                 else => null,
                             };
-                            if (dec) |d| try p.esc(d, o) else try writeAll(o, text[i .. j + 1]);
-                            i = j + 1;
-                            h = true;
+                            if (d_opt) |d| {
+                                try p.esc(d, o);
+                                i = j + 1;
+                                h = true;
+                            }
                         }
                     }
                     if (!h) {
@@ -1430,32 +1447,39 @@ pub const OctomarkParser = struct {
                         }
                     }
                 },
-                '<' => if (lc.len >= 3) {
-                    var h_bk = false;
+                '<' => if (lc.len >= 3 and ls <= 3) {
+                    var h_t: u8 = 0;
                     if (lc.len >= 4 and lc[1] == '!') {
-                        h_bk = std.mem.startsWith(u8, lc, "<!--") or std.mem.startsWith(u8, lc, "<![CDATA[");
-                    } else if (lc.len >= 2 and lc[1] == '?') h_bk = true else {
-                        const tgs = [_][]const u8{
-                            "script",   "pre",      "style",  "address",  "article",    "aside",  "base",    "basefont", "blockquote",
-                            "body",     "caption",  "center", "col",      "colgroup",   "dd",     "details", "dialog",   "dir",
-                            "div",      "dl",       "dt",     "fieldset", "figcaption", "figure", "footer",  "form",     "frame",
-                            "frameset", "h1",       "h2",     "h3",       "h4",         "h5",     "h6",      "head",     "header",
-                            "hr",       "html",     "iframe", "legend",   "li",         "link",   "main",    "menu",     "menuitem",
-                            "nav",      "noframes", "ol",     "optgroup", "option",     "p",      "param",   "section",  "source",
-                            "summary",  "table",    "tbody",  "<td>",     "tfoot",      "th",     "thead",   "title",    "tr",
-                            "<ul>",
-                        };
+                        if (std.mem.startsWith(u8, lc, "<!--")) h_t = 2 else if (std.mem.startsWith(u8, lc, "<![CDATA[")) h_t = 5 else h_t = 4;
+                    } else if (lc.len >= 2 and lc[1] == '?') h_t = 3 else {
                         const tr = if (lc[1] == '/') lc[2..] else lc[1..];
-                        for (tgs) |tg| {
-                            if (std.mem.startsWith(u8, tr, tg)) {
-                                if (tr.len == tg.len or (tr[tg.len] == ' ' or tr[tg.len] == '>' or tr[tg.len] == '/')) {
-                                    h_bk = true;
+                        const t1 = [_][]const u8{ "script", "pre", "style" };
+                        for (t1) |t| if (std.mem.startsWith(u8, tr, t)) {
+                            if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
+                                h_t = 1;
+                                break;
+                            }
+                        };
+                        if (h_t == 0) {
+                            const t6 = [_][]const u8{
+                                "address",  "article",  "aside",    "base",       "basefont", "blockquote", "body",   "caption",
+                                "center",   "col",      "colgroup", "dd",         "details",  "dialog",     "dir",    "div",
+                                "dl",       "dt",       "fieldset", "figcaption", "figure",   "footer",     "form",   "frame",
+                                "frameset", "h1",       "h2",       "h3",         "h4",       "h5",         "h6",     "head",
+                                "header",   "hr",       "html",     "iframe",     "legend",   "li",         "link",   "main",
+                                "menu",     "menuitem", "nav",      "noframes",   "ol",       "optgroup",   "option", "p",
+                                "param",    "section",  "source",   "summary",    "table",    "tbody",      "td",     "tfoot",
+                                "th",       "thead",    "title",    "tr",         "ul",
+                            };
+                            for (t6) |t| if (std.mem.startsWith(u8, tr, t)) {
+                                if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
+                                    h_t = 6;
                                     break;
                                 }
-                            }
+                            };
                         }
                     }
-                    if (h_bk) {
+                    if (h_t > 0) {
                         try p.renderTop(o);
                         try writeAll(o, lc);
                         try writeByte(o, '\n');
@@ -1539,7 +1563,7 @@ pub const OctomarkParser = struct {
 
         if (i >= len or !std.ascii.isAlphabetic(text[i])) return 0;
 
-        while (i < len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '-' or text[i] == ':')) : (i += 1) {}
+        while (i < len and (std.ascii.isAlphanumeric(text[i]) or text[i] == '-')) : (i += 1) {}
 
         while (i < len) {
             // Check for end of tag
