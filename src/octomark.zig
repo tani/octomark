@@ -11,6 +11,7 @@ const BlockType = enum(u8) {
     definition_list,
     definition_description,
     code,
+    indented_code,
     math,
     table,
     paragraph,
@@ -24,6 +25,7 @@ const block_close_tags = blk: {
     tags[@intFromEnum(BlockType.definition_list)] = "</dl>\n";
     tags[@intFromEnum(BlockType.definition_description)] = "</dd>\n";
     tags[@intFromEnum(BlockType.code)] = "</code></pre>\n";
+    tags[@intFromEnum(BlockType.indented_code)] = "</code></pre>\n";
     tags[@intFromEnum(BlockType.math)] = "</div>\n";
     tags[@intFromEnum(BlockType.table)] = "</tbody></table>\n";
     tags[@intFromEnum(BlockType.paragraph)] = "</p>\n";
@@ -61,6 +63,14 @@ const html_escape_map = blk: {
     map['\"'] = "&quot;";
     map['\''] = "&#39;";
     break :blk map;
+};
+
+const special_chars_lut = blk: {
+    var lut: [256]bool = [_]bool{false} ** 256;
+    for (special_chars) |c| {
+        lut[c] = true;
+    }
+    break :blk lut;
 };
 
 pub const OctomarkParser = struct {
@@ -307,9 +317,9 @@ pub const OctomarkParser = struct {
     fn findNextSpecial(parser: *OctomarkParser, text: []const u8, start: usize) usize {
         const _s = parser.startCall(.findNextSpecial);
         defer parser.endCall(.findNextSpecial, _s);
-        if (start >= text.len) return text.len;
-        if (std.mem.indexOfAny(u8, text[start..], special_chars)) |offset| {
-            return start + offset;
+        var i = start;
+        while (i < text.len) : (i += 1) {
+            if (special_chars_lut[text[i]]) return i;
         }
         return text.len;
     }
@@ -576,7 +586,12 @@ pub const OctomarkParser = struct {
                     } else {
                         while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
                         if (j > i + 1 and j < text.len and text[j] == ';') {
-                            try writeAll(output, text[i .. j + 1]);
+                            const entity = text[i + 1 .. j];
+                            if (decodeEntity(entity)) |decoded| {
+                                try parser.appendEscapedText(decoded, output);
+                            } else {
+                                try writeAll(output, text[i .. j + 1]);
+                            }
                             i = j + 1;
                             handled = true;
                         }
@@ -606,9 +621,36 @@ pub const OctomarkParser = struct {
         }
     }
 
+    fn decodeEntity(inner: []const u8) ?[]const u8 {
+        if (inner.len < 2) return null;
+        switch (inner[0]) {
+            'a' => if (std.mem.eql(u8, inner, "amp")) return "&" else if (std.mem.eql(u8, inner, "apos")) return "'",
+            'l' => if (std.mem.eql(u8, inner, "lt")) return "<",
+            'g' => if (std.mem.eql(u8, inner, "gt")) return ">",
+            'q' => if (std.mem.eql(u8, inner, "quot")) return "\"",
+            'c' => if (std.mem.eql(u8, inner, "copy")) return "©",
+            'r' => if (std.mem.eql(u8, inner, "reg")) return "®",
+            'n' => if (std.mem.eql(u8, inner, "nbsp")) return "\u{00A0}",
+            else => return null,
+        }
+        return null;
+    }
+    fn parseIndentedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
+        const bt = parser.currentBlockType();
+        if (leading_spaces >= 4 and bt != .paragraph and bt != .table and bt != .code and bt != .math and bt != .indented_code) {
+            try parser.closeParagraphIfOpen(output);
+            try parser.pushBlock(.indented_code, 0);
+            try writeAll(output, "<pre><code>");
+            try parser.appendEscapedText(line_content, output);
+            try writeByte(output, '\n');
+            return true;
+        }
+        return false;
+    }
+
     fn processLeafBlockContinuation(parser: *OctomarkParser, line: []const u8, output: anytype) !bool {
-        const top = parser.currentBlockType();
-        if (top != .code and top != .math) return false;
+        const top = parser.currentBlockType() orelse return false;
+        if (top != .code and top != .math and top != .indented_code) return false;
 
         var text_slice = line;
         var i: usize = 0;
@@ -634,10 +676,21 @@ pub const OctomarkParser = struct {
                 try parser.renderAndCloseTopBlock(output);
                 return true;
             }
-        } else {
+        } else if (top == .math) {
             if (trimmed.len >= 2 and std.mem.eql(u8, trimmed[0..2], "$$")) {
                 try parser.renderAndCloseTopBlock(output);
                 return true;
+            }
+        } else if (top == .indented_code) {
+            var spaces: usize = 0;
+            while (spaces < text_slice.len and text_slice[spaces] == ' ') : (spaces += 1) {}
+            const is_blank = (spaces == text_slice.len);
+            if (!is_blank) {
+                if (spaces < 4) {
+                    try parser.renderAndCloseTopBlock(output);
+                    return false;
+                }
+                text_slice = text_slice[4..];
             }
         }
 
@@ -1122,10 +1175,28 @@ pub const OctomarkParser = struct {
                     if (line_content.len >= 3) {
                         const lc = line_content;
                         var is_html_block = false;
-                        if (lc.len >= 5 and lc[1] == 'd' and std.mem.startsWith(u8, lc, "<div>")) is_html_block = true;
-                        if (!is_html_block and lc.len >= 5 and lc[1] == 'p' and (std.mem.startsWith(u8, lc, "<pre>") or std.mem.startsWith(u8, lc, "<p>"))) is_html_block = true;
-                        if (!is_html_block and lc.len >= 7 and lc[1] == 't' and std.mem.startsWith(u8, lc, "<table>")) is_html_block = true;
-
+                        if (lc.len >= 4 and lc[1] == '!') {
+                            if (std.mem.startsWith(u8, lc, "<!--")) is_html_block = true;
+                            if (std.mem.startsWith(u8, lc, "<![CDATA[")) is_html_block = true;
+                        } else if (lc.len >= 2 and lc[1] == '?') {
+                            is_html_block = true;
+                        } else {
+                            const tags = [_][]const u8{ "script", "pre", "style", "address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu", "menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param", "section", "source", "summary", "table", "tbody", "<td>", "tfoot", "th", "thead", "title", "tr", "<ul>" };
+                            const trimmed_lc = if (lc[1] == '/') lc[2..] else lc[1..];
+                            for (tags) |tag| {
+                                if (std.mem.startsWith(u8, trimmed_lc, tag)) {
+                                    if (trimmed_lc.len == tag.len) {
+                                        is_html_block = true;
+                                        break;
+                                    }
+                                    const next = trimmed_lc[tag.len];
+                                    if (next == ' ' or next == '>' or next == '/') {
+                                        is_html_block = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         if (is_html_block) {
                             try parser.renderAndCloseTopBlock(output);
                             try writeAll(output, line_content);
@@ -1139,6 +1210,8 @@ pub const OctomarkParser = struct {
         }
 
         if (!is_dl and try parser.parseDefinitionTerm(line_content, full_data, current_pos, output)) return false;
+
+        if (!is_list and !is_dl and try parser.parseIndentedCodeBlock(line_content, leading_spaces, output)) return true;
 
         try parser.processParagraph(line_content, is_dl, is_list, output);
         return false;
@@ -1278,7 +1351,7 @@ pub const OctomarkParser = struct {
         switch (str[0]) {
             '`' => return str.len >= 3 and std.mem.startsWith(u8, str, "```"),
             '$' => return str.len >= 2 and std.mem.startsWith(u8, str, "$$"),
-            '#', ':' => return true,
+            '.', ':', '<', '|' => return true,
             '-' => return str.len >= 2 and (str[1] == ' ' or (str.len >= 3 and std.mem.startsWith(u8, str, "---"))),
             '*' => return str.len >= 3 and std.mem.startsWith(u8, str, "***"),
             '_' => return str.len >= 3 and std.mem.startsWith(u8, str, "___"),
