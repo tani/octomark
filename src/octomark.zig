@@ -952,7 +952,19 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.parseIndentedCodeBlock, _s);
 
         const bt = parser.currentBlockType();
-        if (leading_spaces >= 4 and bt != .paragraph and bt != .table and bt != .code and bt != .math and bt != .indented_code) {
+        var list_indent: ?i32 = null;
+        var idx = parser.stack_depth;
+        while (idx > 0) {
+            idx -= 1;
+            const entry = parser.block_stack[idx];
+            if (entry.block_type == .unordered_list or entry.block_type == .ordered_list) {
+                list_indent = entry.indent_level;
+                break;
+            }
+        }
+
+        const required_indent: usize = if (list_indent) |indent| @intCast(indent + 4) else 4;
+        if (leading_spaces >= required_indent and bt != .paragraph and bt != .table and bt != .code and bt != .math and bt != .indented_code) {
             try parser.closeParagraphIfOpen(output);
             try parser.pushBlock(.indented_code, 0);
             try writeAll(output, "<pre><code>");
@@ -1028,6 +1040,7 @@ pub const OctomarkParser = struct {
     fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
         const _s = parser.startCall(.parseFencedCodeBlock);
         defer parser.endCall(.parseFencedCodeBlock, _s);
+        if (leading_spaces > 3) return false;
         const content = std.mem.trimLeft(u8, line_content, " ");
         const extra_spaces = line_content.len - content.len;
 
@@ -1128,10 +1141,10 @@ pub const OctomarkParser = struct {
         return false;
     }
 
-    fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
+    fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
         const _s = parser.startCall(.parseHorizontalRule);
         defer parser.endCall(.parseHorizontalRule, _s);
-        if (isThematicBreakLine(line_content)) {
+        if (leading_spaces <= 3 and isThematicBreakLine(line_content)) {
             try parser.tryCloseLeafBlock(output);
             try writeAll(output, "<hr>\n");
             return true;
@@ -1181,6 +1194,18 @@ pub const OctomarkParser = struct {
         var line = line_content.*;
         if (line.len == 0) return false;
         if (isThematicBreakLine(line)) return false;
+        if (leading_spaces.* >= 4) {
+            var has_list = false;
+            var i: usize = 0;
+            while (i < parser.stack_depth) : (i += 1) {
+                const bt = parser.block_stack[i].block_type;
+                if (bt == .unordered_list or bt == .ordered_list) {
+                    has_list = true;
+                    break;
+                }
+            }
+            if (!has_list) return false;
+        }
 
         const trimmed_line = std.mem.trimLeft(u8, line, " ");
         const internal_spaces = line.len - trimmed_line.len;
@@ -1424,7 +1449,7 @@ pub const OctomarkParser = struct {
         }
 
         if (quote_level < current_quote_level and (parser.currentBlockType() == .paragraph or parser.currentBlockType() == .unordered_list or parser.currentBlockType() == .ordered_list or parser.currentBlockType() == .blockquote)) {
-            if (!parser.isBlockStartMarker(line_content)) quote_level = current_quote_level;
+            if (!parser.isBlockStartMarker(line_content, leading_spaces)) quote_level = current_quote_level;
         }
 
         while (current_quote_level > quote_level) {
@@ -1455,9 +1480,9 @@ pub const OctomarkParser = struct {
                 '`', '~' => if (try parser.parseFencedCodeBlock(line_content, leading_spaces, output)) return false,
                 '$' => if (try parser.parseMathBlock(line_content, leading_spaces, output)) return false,
                 '-' => {
-                    if (try parser.parseHorizontalRule(line_content, output)) return false;
+                    if (try parser.parseHorizontalRule(line_content, leading_spaces, output)) return false;
                 },
-                '*', '_' => if (try parser.parseHorizontalRule(line_content, output)) return false,
+                '*', '_' => if (try parser.parseHorizontalRule(line_content, leading_spaces, output)) return false,
                 '|' => if (try parser.parseTable(line_content, full_data, current_pos, output)) return true,
                 '>' => {
                     var q_cnt: usize = 0;
@@ -1522,7 +1547,7 @@ pub const OctomarkParser = struct {
 
         if (!is_dl and try parser.parseDefinitionTerm(line_content, full_data, current_pos, output)) return false;
 
-        if (!is_list and !is_dl and try parser.parseIndentedCodeBlock(line_content, leading_spaces, output)) return true;
+        if (!is_list and !is_dl and try parser.parseIndentedCodeBlock(line_content, leading_spaces, output)) return false;
 
         try parser.processParagraph(line_content, is_dl, is_list, output);
         return false;
@@ -1685,9 +1710,10 @@ pub const OctomarkParser = struct {
         return count;
     }
 
-    fn isBlockStartMarker(parser: *OctomarkParser, str: []const u8) bool {
+    fn isBlockStartMarker(parser: *OctomarkParser, str: []const u8, leading_spaces: usize) bool {
         const _s = parser.startCall(.isBlockStartMarker);
         defer parser.endCall(.isBlockStartMarker, _s);
+        if (leading_spaces > 3) return false;
         if (str.len == 0) return false;
         if (isThematicBreakLine(str)) return true;
         switch (str[0]) {
