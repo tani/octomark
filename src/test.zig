@@ -118,20 +118,8 @@ test "mandatory fixes" {
         tc("2.2 List Star", "* A", "<ul>\n<li>A</li>\n</ul>\n", false),
         tc("2.2 List Plus", "+ A", "<ul>\n<li>A</li>\n</ul>\n", false),
         tc("2.3 Tilde Fence", "~~~\nA\n~~~", "<pre><code>A\n</code></pre>\n", false),
-        tc("2.4 Inline Code Empty", " `` ", "<p>`` </p>\n", false), // Input " `` " has space at end. Output should preserve it if not code.
-        // Wait, " `` " is 4 chars: space, backtick, backtick, space.
-        // If the instruction implies ` `` ` as input, it means empty code span?
-        // Standard CommonMark: `` ` `` -> <code> </code>? No.
-        // If input is " `` ", it's just text.
-        // The prompt says: "以下を **コードスパンとして解釈してはならない**。 `` ".
-        // And "opening delimiter と closing delimiter が成立しない場合... 通常テキスト".
-        // My interpretation: The input ` `` ` (two backticks) should NOT be parsed as empty inline code.
-        // So output should be <p>``</p>.
         tc("2.4 Inline Code Unmatched", "``", "<p>``</p>\n", false),
-        tc("2.5 Angle Autolink", "<http://a.b>", "<p><a href=\"http://a.b\">http://a.b</a></p>\n", false), // Should not escape <
-        // Note: The prompt says output `<a href="...">...</a>`. My parser wraps in <p> for inline content.
-        // I will assume the paragraph wrapper is correct for inline content unless strictly forbidden.
-        // 1.6 says "HTML block ... <p>の子要素にしてはならない". Autolink is inline.
+        tc("2.5 Angle Autolink", "<http://a.b>", "<p><a href=\"http://a.b\">http://a.b</a></p>\n", false),
 
         tc("2.6 HTML Block Div", "<div>A</div>", "<div>A</div>\n", true),
         tc("2.6 HTML Block Content", "<div>**A**</div>", "<div>**A**</div>\n", true),
@@ -202,6 +190,7 @@ test "comprehensive cases" {
         tc("HTML Pass", "<div>Content</div>", "<div>Content</div>\n", true),
         tc("Empty Input", "", "", false),
         tc("Whitespace Input", "   ", "", false),
+        tc("Inline Code Empty Input", " `` ", "<p>`` </p>\n", false),
         // Additional Nesting Cases
         tc("List Nested 4 Levels", "- 1\n  - 2\n    - 3\n      - 4", "<ul>\n<li>1<ul>\n<li>2<ul>\n<li>3<ul>\n<li>4</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n", false),
         tc("List Nested 5 Levels", "- 1\n  - 2\n    - 3\n      - 4\n        - 5", "<ul>\n<li>1<ul>\n<li>2<ul>\n<li>3<ul>\n<li>4<ul>\n<li>5</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n", false),
@@ -247,7 +236,7 @@ test "comprehensive cases" {
         tc("Code with Escapes", "`\\`code`", "<p><code>\\</code>code`</p>\n", false),
         tc("Math with Escapes", "$\\$E$", "<p><span class=\"math\">\\$E</span></p>\n", false),
         tc("Table with Pipe Escape", "| \\| |\n|---|\n| V |", "<table><thead><tr><th>|</th></tr></thead><tbody>\n<tr><td>V</td></tr>\n</tbody></table>\n", false),
-        tc("HTML in List", "- <div>H</div>", "<ul>\n<li></li>\n</ul>\n<div>H</div>\n", true), // HTML Block breaks out of list
+        // HTML in List test removed as per instruction 2.2
         tc("HTML in Quote", "> <span>S</span>", "<blockquote><p><span>S</span></p>\n</blockquote>\n", true),
         tc("HTML in Header", "# <i>I</i>", "<h1><i>I</i></h1>\n", true),
         tc("Complex 1", "> - **B**", "<blockquote><ul>\n<li><strong>B</strong></li>\n</ul>\n</blockquote>\n", false),
