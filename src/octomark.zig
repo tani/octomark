@@ -294,18 +294,18 @@ pub const OctomarkParser = struct {
                 return a.pos < b.pos;
             }
         }.less);
-        try p.parseInlineContentDepth(text, o, 0, 0);
+        try p.parseInlineContentDepth(text, o, 0, 0, false);
     }
 
-    fn parseInlineContentDepth(parser: *OctomarkParser, text: []const u8, output: anytype, depth: usize, global_offset: usize) anyerror!void {
-        const _s = parser.startCall(.parseInlineContent);
-        defer parser.endCall(.parseInlineContent, _s);
+    fn parseInlineContentDepth(p: *OctomarkParser, text: []const u8, o: anytype, depth: usize, g_off: usize, plain: bool) anyerror!void {
+        const _s = p.startCall(.parseInlineContent);
+        defer p.endCall(.parseInlineContent, _s);
 
-        if (depth > 10) {
-            try writeAll(output, text);
+        if (depth > MAX_INLINE_NESTING) {
+            try writeAll(o, text);
             return;
         }
-        try parser.renderInline(text, parser.replacements.items, output, depth, global_offset);
+        try p.renderInline(text, p.replacements.items, o, depth, g_off, plain);
     }
 
     fn scanDelims(p: *OctomarkParser, text: []const u8, start_pos: usize, char: u8, bottom: usize) !usize {
@@ -377,7 +377,7 @@ pub const OctomarkParser = struct {
         }
     }
 
-    fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement, o: anytype, depth: usize, g_off: usize) !void {
+    fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement, o: anytype, depth: usize, g_off: usize, plain: bool) !void {
         const s = p.startCall(.renderInline);
         defer p.endCall(.renderInline, s);
         var i: usize = 0;
@@ -386,7 +386,7 @@ pub const OctomarkParser = struct {
             while (r_idx < reps.len and reps[r_idx].pos < g_off + i) r_idx += 1;
             if (r_idx < reps.len and reps[r_idx].pos == g_off + i) {
                 const rep = reps[r_idx];
-                try writeAll(o, rep.text);
+                if (!plain) try writeAll(o, rep.text);
                 i += rep.end - rep.pos;
                 r_idx += 1;
                 continue;
@@ -396,9 +396,11 @@ pub const OctomarkParser = struct {
             if (next > next_rep) next = next_rep;
             if (next < text.len and text[next] == '\n' and next < next_rep) {
                 var t_end = next;
-                while (t_end > i and text[t_end - 1] == ' ') t_end -= 1;
-                if (t_end > i) try writeAll(o, text[i..t_end]);
-                try writeAll(o, if (next - t_end >= 2) "<br>\n" else "\n");
+                if (!plain) {
+                    while (t_end > i and text[t_end - 1] == ' ') t_end -= 1;
+                    if (t_end > i) try writeAll(o, text[i..t_end]);
+                    try writeAll(o, if (next - t_end >= 2) "<br>\n" else "\n");
+                } else if (t_end > i) try writeAll(o, text[i..t_end]);
                 i = next + 1;
                 continue;
             }
@@ -443,7 +445,7 @@ pub const OctomarkParser = struct {
                         const j = i + 2 + off;
                         if (depth + 1 <= MAX_INLINE_NESTING) {
                             try writeAll(o, "<del>");
-                            try p.parseInlineContentDepth(text[i + 2 .. j], o, depth + 1, g_off + i + 2);
+                            try p.parseInlineContentDepth(text[i + 2 .. j], o, depth + 1, g_off + i + 2, false);
                             try writeAll(o, "</del>");
                             i = j + 2;
                             h = true;
@@ -490,7 +492,6 @@ pub const OctomarkParser = struct {
                                 var m = p_s;
                                 while (m < text.len) : (m += 1) {
                                     const ch = text[m];
-                                    if (ch == '\n') break;
                                     if (ch == '\\' and m + 1 < text.len and isPunct(text[m + 1])) {
                                         m += 1;
                                         continue;
@@ -525,25 +526,19 @@ pub const OctomarkParser = struct {
                                             try writeAll(o, e);
                                         } else try writeByte(o, ch);
                                     }
-                                    inline for (.{ true, false }) |alt_pass| {
-                                        const alt = alt_pass;
-                                        const span = if (alt) (if (img) text[b_s..b_e] else null) else tit;
-                                        if (span) |s_v| {
-                                            try writeAll(o, if (alt) "\" alt=\"" else "\" title=\"");
-                                            var s_i: usize = 0;
-                                            while (s_i < s_v.len) : (s_i += 1) {
-                                                var ch = s_v[s_i];
-                                                if (ch == '\\' and s_i + 1 < s_v.len and isPunct(s_v[s_i + 1])) {
-                                                    s_i += 1;
-                                                    ch = s_v[s_i];
-                                                }
-                                                if (html_escape_map[ch]) |e| try writeAll(o, e) else try writeByte(o, ch);
-                                            }
-                                        }
+                                    try writeByte(o, '"');
+                                    if (tit) |t| {
+                                        try writeAll(o, " title=\"");
+                                        try p.esc(t, o);
+                                        try writeByte(o, '"');
                                     }
-                                    try writeAll(o, "\">");
-                                    if (!img) {
-                                        try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s);
+                                    if (img) {
+                                        try writeAll(o, " alt=\"");
+                                        try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s, true);
+                                        try writeAll(o, "\">");
+                                    } else {
+                                        try writeAll(o, ">");
+                                        try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s, false);
                                         try writeAll(o, "</a>");
                                     }
                                     i = p_e + 1;
@@ -1475,6 +1470,14 @@ pub const OctomarkParser = struct {
                                     break;
                                 }
                             };
+                        }
+                        if (h_t == 0 and p.topT() != .paragraph) {
+                            const l = p.parseHtmlTag(lc);
+                            if (l > 0) {
+                                var rem = lc[l..];
+                                while (rem.len > 0 and (rem[0] == ' ' or rem[0] == '\t')) rem = rem[1..];
+                                if (rem.len == 0) h_t = 7;
+                            }
                         }
                     }
                     if (h_t > 0) {
