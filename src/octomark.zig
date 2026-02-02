@@ -282,12 +282,17 @@ pub const OctomarkParser = struct {
         const _s = @constCast(parser).startCall(.appendEscapedText);
         defer @constCast(parser).endCall(.appendEscapedText, _s);
         var i: usize = 0;
-        while (i < text.len) : (i += 1) {
-            const entity = html_escape_map[text[i]];
-            if (entity) |value| {
-                try writeAll(output, value);
+        const escape_chars = "&<>\"'";
+        while (i < text.len) {
+            if (std.mem.indexOfAny(u8, text[i..], escape_chars)) |offset| {
+                const j = i + offset;
+                if (j > i) try writeAll(output, text[i..j]);
+                const entity = html_escape_map[text[j]].?;
+                try writeAll(output, entity);
+                i = j + 1;
             } else {
-                try writeByte(output, text[i]);
+                try writeAll(output, text[i..]);
+                break;
             }
         }
     }
@@ -313,248 +318,242 @@ pub const OctomarkParser = struct {
         while (i < text.len) {
             const start = i;
             i = parser.findNextSpecial(text, i);
-
             if (i > start) try writeAll(output, text[start..i]);
             if (i >= text.len) break;
 
             const c = text[i];
-
-            // Backslash escape or line break
-            if (c == '\\') {
-                if (i + 1 < text.len) {
-                    if (std.ascii.isAlphanumeric(text[i + 1])) {
-                        try writeByte(output, '\\');
-                        i += 1;
-                        continue;
-                    }
-                    i += 1;
-                    try writeByte(output, text[i]);
-                    i += 1;
-                    continue;
-                } else {
-                    try writeAll(output, "<br>");
-                    i += 1;
-                    continue;
-                }
-            }
-
-            // Paired delimiters: **bold**, _italic_, ~~strikethrough~~
-            const delims = [_]struct { tag: []const u8, marker: []const u8 }{
-                .{ .tag = "strong", .marker = "**" },
-                .{ .tag = "em", .marker = "_" },
-                .{ .tag = "del", .marker = "~~" },
-            };
-
             var handled = false;
-            for (delims) |d| {
-                if (std.mem.startsWith(u8, text[i..], d.marker)) {
-                    if (std.mem.indexOf(u8, text[i + d.marker.len ..], d.marker)) |offset| {
-                        const j = i + d.marker.len + offset;
+            switch (c) {
+                '\\' => {
+                    if (i + 1 < text.len) {
+                        if (std.ascii.isAlphanumeric(text[i + 1])) {
+                            try writeByte(output, '\\');
+                            i += 1;
+                        } else {
+                            i += 1;
+                            try writeByte(output, text[i]);
+                            i += 1;
+                        }
+                    } else {
+                        try writeAll(output, "<br>");
+                        i += 1;
+                    }
+                    handled = true;
+                },
+                '*' => {
+                    if (std.mem.startsWith(u8, text[i..], "**")) {
+                        if (std.mem.indexOf(u8, text[i + 2 ..], "**")) |offset| {
+                            const j = i + 2 + offset;
+                            if (depth + 1 <= MAX_INLINE_NESTING) {
+                                try writeAll(output, "<strong>");
+                                try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
+                                try writeAll(output, "</strong>");
+                                i = j + 2;
+                                handled = true;
+                            }
+                        }
+                    }
+                },
+                '_' => {
+                    if (std.mem.indexOfScalar(u8, text[i + 1 ..], '_')) |offset| {
+                        const j = i + 1 + offset;
                         if (depth + 1 <= MAX_INLINE_NESTING) {
-                            try writeAll(output, "<");
-                            try writeAll(output, d.tag);
-                            try writeAll(output, ">");
-                            try parser.parseInlineContentDepth(text[i + d.marker.len .. j], output, depth + 1);
-                            try writeAll(output, "</");
-                            try writeAll(output, d.tag);
-                            try writeAll(output, ">");
-                            i = j + d.marker.len;
+                            try writeAll(output, "<em>");
+                            try parser.parseInlineContentDepth(text[i + 1 .. j], output, depth + 1);
+                            try writeAll(output, "</em>");
+                            i = j + 1;
                             handled = true;
-                            break;
                         }
                     }
-                }
-            }
-            if (handled) continue;
-
-            // Code: `text`
-            if (c == '`') {
-                var code_end: ?usize = null;
-                var backtick_count: usize = 1;
-                while (i + backtick_count < text.len and text[i + backtick_count] == '`') {
-                    backtick_count += 1;
-                }
-
-                if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |offset| {
-                    const j = i + backtick_count + offset;
-                    code_end = j;
-                }
-
-                if (code_end) |j| {
-                    const content = text[i + backtick_count .. j];
-
-                    try writeAll(output, "<code>");
-                    try parser.appendEscapedText(content, output);
-                    try writeAll(output, "</code>");
-                    i = j + backtick_count;
-                    continue;
-                }
-            }
-
-            // Link: [text](url) or Image: ![text](url)
-            if (c == '[' or (c == '!' and i + 1 < text.len and text[i + 1] == '[')) {
-                const is_image = (c == '!');
-                const bracket_start = if (is_image) i + 2 else i + 1;
-
-                var bracket_end_opt: ?usize = null;
-                var bracket_depth: usize = 1;
-                var k = bracket_start;
-                while (k < text.len) : (k += 1) {
-                    if (text[k] == '\\' and k + 1 < text.len) {
-                        k += 1;
-                        continue;
-                    }
-                    if (text[k] == ']') {
-                        bracket_depth -= 1;
-                        if (bracket_depth == 0) {
-                            bracket_end_opt = k;
-                            break;
+                },
+                '~' => {
+                    if (std.mem.startsWith(u8, text[i..], "~~")) {
+                        if (std.mem.indexOf(u8, text[i + 2 ..], "~~")) |offset| {
+                            const j = i + 2 + offset;
+                            if (depth + 1 <= MAX_INLINE_NESTING) {
+                                try writeAll(output, "<del>");
+                                try parser.parseInlineContentDepth(text[i + 2 .. j], output, depth + 1);
+                                try writeAll(output, "</del>");
+                                i = j + 2;
+                                handled = true;
+                            }
                         }
-                    } else if (text[k] == '[') {
-                        bracket_depth += 1;
                     }
-                }
-
-                if (bracket_end_opt) |bracket_end| {
-                    if (bracket_end + 1 < text.len and text[bracket_end + 1] == '(') {
-                        if (std.mem.indexOfScalar(u8, text[bracket_end + 2 ..], ')')) |paren_offset| {
-                            const paren_end = bracket_end + 2 + paren_offset;
-                            const label = text[bracket_start..bracket_end];
-                            const url = text[bracket_end + 2 .. paren_end];
-
-                            if (is_image) {
-                                try writeAll(output, "<img src=\"");
-                                try writeAll(output, url);
-                                try writeAll(output, "\" alt=\"");
-                                var m: usize = 0;
-                                while (m < label.len) : (m += 1) {
-                                    if (label[m] == '\\' and m + 1 < label.len) {
-                                        m += 1;
-                                        try writeByte(output, label[m]);
+                },
+                '`' => {
+                    var backtick_count: usize = 1;
+                    while (i + backtick_count < text.len and text[i + backtick_count] == '`') {
+                        backtick_count += 1;
+                    }
+                    if (std.mem.indexOf(u8, text[i + backtick_count ..], text[i .. i + backtick_count])) |offset| {
+                        const j = i + backtick_count + offset;
+                        const content = text[i + backtick_count .. j];
+                        try writeAll(output, "<code>");
+                        try parser.appendEscapedText(content, output);
+                        try writeAll(output, "</code>");
+                        i = j + backtick_count;
+                        handled = true;
+                    }
+                },
+                '[', '!' => {
+                    const is_image = (c == '!');
+                    if (!is_image or (i + 1 < text.len and text[i + 1] == '[')) {
+                        const bracket_start = if (is_image) i + 2 else i + 1;
+                        var bracket_end_opt: ?usize = null;
+                        var bracket_depth: usize = 1;
+                        var k = bracket_start;
+                        while (k < text.len) : (k += 1) {
+                            if (text[k] == '\\' and k + 1 < text.len) {
+                                k += 1;
+                                continue;
+                            }
+                            if (text[k] == ']') {
+                                bracket_depth -= 1;
+                                if (bracket_depth == 0) {
+                                    bracket_end_opt = k;
+                                    break;
+                                }
+                            } else if (text[k] == '[') {
+                                bracket_depth += 1;
+                            }
+                        }
+                        if (bracket_end_opt) |bracket_end| {
+                            if (bracket_end + 1 < text.len and text[bracket_end + 1] == '(') {
+                                if (std.mem.indexOfScalar(u8, text[bracket_end + 2 ..], ')')) |paren_offset| {
+                                    const paren_end = bracket_end + 2 + paren_offset;
+                                    const label = text[bracket_start..bracket_end];
+                                    const url = text[bracket_end + 2 .. paren_end];
+                                    if (is_image) {
+                                        try writeAll(output, "<img src=\"");
+                                        try writeAll(output, url);
+                                        try writeAll(output, "\" alt=\"");
+                                        var m: usize = 0;
+                                        while (m < label.len) : (m += 1) {
+                                            if (label[m] == '\\' and m + 1 < label.len) {
+                                                m += 1;
+                                                try writeByte(output, label[m]);
+                                            } else {
+                                                try writeByte(output, label[m]);
+                                            }
+                                        }
+                                        try writeAll(output, "\">");
+                                        i = paren_end + 1;
+                                        handled = true;
                                     } else {
-                                        try writeByte(output, label[m]);
+                                        if (depth + 1 <= MAX_INLINE_NESTING) {
+                                            try writeAll(output, "<a href=\"");
+                                            try writeAll(output, url);
+                                            try writeAll(output, "\">");
+                                            try parser.parseInlineContentDepth(label, output, depth + 1);
+                                            try writeAll(output, "</a>");
+                                            i = paren_end + 1;
+                                            handled = true;
+                                        }
                                     }
                                 }
-                                try writeAll(output, "\">");
-                                i = paren_end + 1;
-                                continue;
-                            } else {
-                                if (depth + 1 <= MAX_INLINE_NESTING) {
-                                    try writeAll(output, "<a href=\"");
-                                    try writeAll(output, url);
-                                    try writeAll(output, "\">");
-                                    try parser.parseInlineContentDepth(label, output, depth + 1);
-                                    try writeAll(output, "</a>");
-                                    i = paren_end + 1;
-                                    continue;
+                            }
+                        }
+                    }
+                },
+                '<' => {
+                    // Angle bracket autolink: <http://...>
+                    if (i + 1 < text.len) {
+                        const scheme_end = std.mem.indexOfScalar(u8, text[i + 1 ..], ':');
+                        if (scheme_end) |offset| {
+                            const scheme_len = offset;
+                            var is_scheme = true;
+                            var si: usize = 0;
+                            while (si < scheme_len) : (si += 1) {
+                                const sc = text[i + 1 + si];
+                                if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
+                                    is_scheme = false;
+                                    break;
+                                }
+                            }
+                            if (is_scheme) {
+                                if (std.mem.indexOfScalar(u8, text[i + 1 ..], '>')) |end_offset| {
+                                    const link_content = text[i + 1 .. i + 1 + end_offset];
+                                    if (std.mem.indexOfAny(u8, link_content, " \t\n") == null) {
+                                        try writeAll(output, "<a href=\"");
+                                        try writeAll(output, link_content);
+                                        try writeAll(output, "\">");
+                                        try writeAll(output, link_content);
+                                        try writeAll(output, "</a>");
+                                        i = i + 1 + end_offset + 1;
+                                        handled = true;
+                                    }
                                 }
                             }
                         }
                     }
-                }
-            }
-
-            // Angle bracket autolink: <http://...>
-            if (c == '<' and i + 1 < text.len) {
-                // Check if it looks like a URI or email
-                const scheme_end = std.mem.indexOfScalar(u8, text[i + 1 ..], ':');
-                if (scheme_end) |offset| {
-                    const scheme_len = offset;
-                    // basic heuristic for scheme
-                    var is_scheme = true;
-                    var si: usize = 0;
-                    while (si < scheme_len) : (si += 1) {
-                        const sc = text[i + 1 + si];
-                        if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-') {
-                            is_scheme = false;
+                    if (!handled and parser.options.enable_html) {
+                        const tag_len = parser.parseHtmlTag(text[i..]);
+                        if (tag_len > 0) {
+                            try writeAll(output, text[i .. i + tag_len]);
+                            i += tag_len;
+                            handled = true;
+                        }
+                    }
+                },
+                'h' => {
+                    if (i + 4 < text.len and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
+                        var k = i;
+                        while (k < text.len and !std.ascii.isWhitespace(text[k]) and text[k] != '<' and text[k] != '>') : (k += 1) {}
+                        while (k > i) {
+                            const last = text[k - 1];
+                            if (last == ')' or last == '.' or last == ',' or last == ';' or last == '?' or last == '!') {
+                                k -= 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        const url = text[i..k];
+                        try writeAll(output, "<a href=\"");
+                        try writeAll(output, url);
+                        try writeAll(output, "\">");
+                        try writeAll(output, url);
+                        try writeAll(output, "</a>");
+                        i = k;
+                        handled = true;
+                    }
+                },
+                '$' => {
+                    var math_end: ?usize = null;
+                    var k = i + 1;
+                    while (k < text.len) : (k += 1) {
+                        if (text[k] == '\\' and k + 1 < text.len) {
+                            k += 1;
+                            continue;
+                        }
+                        if (text[k] == '$') {
+                            math_end = k;
                             break;
                         }
                     }
-                    if (is_scheme) {
-                        // find closing >
-                        if (std.mem.indexOfScalar(u8, text[i + 1 ..], '>')) |end_offset| {
-                            const link_content = text[i + 1 .. i + 1 + end_offset];
-                            // check for space
-                            if (std.mem.indexOfAny(u8, link_content, " \t\n") == null) {
-                                try writeAll(output, "<a href=\"");
-                                try writeAll(output, link_content);
-                                try writeAll(output, "\">");
-                                try writeAll(output, link_content);
-                                try writeAll(output, "</a>");
-                                i = i + 1 + end_offset + 1;
-                                continue;
-                            }
-                        }
+                    if (math_end) |j| {
+                        try writeAll(output, "<span class=\"math\">");
+                        try parser.appendEscapedText(text[i + 1 .. j], output);
+                        try writeAll(output, "</span>");
+                        i = j + 1;
+                        handled = true;
                     }
-                }
+                },
+                '&', '>', '"', '\'' => {
+                    try writeAll(output, html_escape_map[c].?);
+                    i += 1;
+                    handled = true;
+                },
+                else => {},
             }
-
-            // Auto-link: http:// or https:// (raw)
-            if (c == 'h' and i + 4 < text.len and (std.mem.startsWith(u8, text[i..], "http:") or std.mem.startsWith(u8, text[i..], "https:"))) {
-                var k = i;
-                while (k < text.len and !std.ascii.isWhitespace(text[k]) and text[k] != '<' and text[k] != '>') : (k += 1) {}
-
-                while (k > i) {
-                    const last = text[k - 1];
-                    if (last == ')' or last == '.' or last == ',' or last == ';' or last == '?' or last == '!') {
-                        k -= 1;
-                    } else {
-                        break;
-                    }
+            if (!handled) {
+                const entity = html_escape_map[text[i]];
+                if (entity) |value| {
+                    try writeAll(output, value);
+                } else {
+                    try writeByte(output, text[i]);
                 }
-
-                const url = text[i..k];
-                try writeAll(output, "<a href=\"");
-                try writeAll(output, url);
-                try writeAll(output, "\">");
-                try writeAll(output, url);
-                try writeAll(output, "</a>");
-                i = k;
-                continue;
+                i += 1;
             }
-
-            // Math: $text$
-            if (c == '$') {
-                var math_end: ?usize = null;
-                var k = i + 1;
-                while (k < text.len) : (k += 1) {
-                    if (text[k] == '\\' and k + 1 < text.len) {
-                        k += 1;
-                        continue;
-                    }
-                    if (text[k] == '$') {
-                        math_end = k;
-                        break;
-                    }
-                }
-
-                if (math_end) |j| {
-                    try writeAll(output, "<span class=\"math\">");
-                    try parser.appendEscapedText(text[i + 1 .. j], output);
-                    try writeAll(output, "</span>");
-                    i = j + 1;
-                    continue;
-                }
-            }
-
-            // HTML tag (if enabled)
-            if (c == '<' and parser.options.enable_html) {
-                const tag_len = parser.parseHtmlTag(text[i..]);
-                if (tag_len > 0) {
-                    try writeAll(output, text[i .. i + tag_len]);
-                    i += tag_len;
-                    continue;
-                }
-            }
-
-            // Default: escape or output as-is
-            const entity = html_escape_map[text[i]];
-            if (entity) |value| {
-                try writeAll(output, value);
-            } else {
-                try writeByte(output, text[i]);
-            }
-            i += 1;
         }
     }
 
@@ -681,7 +680,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseHeader(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        const _s = parser.startCall(.parseHeader); defer parser.endCall(.parseHeader, _s);
+        const _s = parser.startCall(.parseHeader);
+        defer parser.endCall(.parseHeader, _s);
         if (line_content.len >= 1 and line_content[0] == '#') {
             var level: usize = 0;
             while (level < 6 and level < line_content.len and line_content[level] == '#') : (level += 1) {}
@@ -712,7 +712,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseHorizontalRule(parser: *OctomarkParser, line_content: []const u8, output: anytype) !bool {
-        const _s = parser.startCall(.parseHorizontalRule); defer parser.endCall(.parseHorizontalRule, _s);
+        const _s = parser.startCall(.parseHorizontalRule);
+        defer parser.endCall(.parseHorizontalRule, _s);
         if (line_content.len == 3 and (std.mem.eql(u8, line_content, "---") or std.mem.eql(u8, line_content, "***") or std.mem.eql(u8, line_content, "___"))) {
             try parser.tryCloseLeafBlock(output);
             try writeAll(output, "<hr>\n");
@@ -722,7 +723,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseDefinitionList(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
-        const _s = parser.startCall(.parseDefinitionList); defer parser.endCall(.parseDefinitionList, _s);
+        const _s = parser.startCall(.parseDefinitionList);
+        defer parser.endCall(.parseDefinitionList, _s);
         var line = line_content.*;
         if (line.len > 0 and line[0] == ':') {
             var consumed: usize = 1;
@@ -757,7 +759,8 @@ pub const OctomarkParser = struct {
     }
 
     fn parseListItem(parser: *OctomarkParser, line_content: *[]const u8, leading_spaces: *usize, output: anytype) !bool {
-        const _s = parser.startCall(.parseListItem); defer parser.endCall(.parseListItem, _s);
+        const _s = parser.startCall(.parseListItem);
+        defer parser.endCall(.parseListItem, _s);
         var line = line_content.*;
         const trimmed_line = std.mem.trimLeft(u8, line, &std.ascii.whitespace);
         const internal_spaces: usize = line.len - trimmed_line.len;
@@ -860,6 +863,7 @@ pub const OctomarkParser = struct {
         }
 
         if (current_pos >= full_data.len) return false;
+        if (std.mem.indexOfScalar(u8, line_content, '|') == null) return false;
         if (!parser.isNextLineTableSeparator(full_data, current_pos)) return false;
 
         const sep_line_end = if (std.mem.indexOfScalar(u8, full_data[current_pos..], '\n')) |nl|
@@ -1078,35 +1082,34 @@ pub const OctomarkParser = struct {
     fn isNextLineTableSeparator(parser: *OctomarkParser, full_data: []const u8, start_pos: usize) bool {
         const _s = parser.startCall(.isNextLineTableSeparator);
         defer parser.endCall(.isNextLineTableSeparator, _s);
-        if (start_pos >= full_data.len) return true; // Treat EOF as buffering safe (incomplete input)
+        if (start_pos >= full_data.len) return false;
 
-        const next_line_end = if (std.mem.indexOfScalar(u8, full_data[start_pos..], '\n')) |nl|
-            start_pos + nl
-        else
-            full_data.len;
+        const next_line = blk: {
+            if (std.mem.indexOfScalar(u8, full_data[start_pos..], '\n')) |nl| {
+                break :blk full_data[start_pos .. start_pos + nl];
+            }
+            break :blk full_data[start_pos..];
+        };
+        const trimmed = std.mem.trim(u8, next_line, &std.ascii.whitespace);
+        if (trimmed.len < 3) return false;
 
-        const next_line = full_data[start_pos..next_line_end];
-        const trimmed_next = std.mem.trim(u8, next_line, &std.ascii.whitespace);
-
-        if (trimmed_next.len < 3) return false;
+        const first = trimmed[0];
+        if (first != '|' and first != '-' and first != ':') return false;
 
         var has_dash = false;
-        var all_valid = true;
-        for (trimmed_next) |c| {
-            if (c == '-' or c == ':' or c == '|') {
-                if (c == '-') has_dash = true;
-                continue;
-            }
-            if (!std.ascii.isWhitespace(c)) {
-                all_valid = false;
-                break;
+        for (trimmed) |c| {
+            switch (c) {
+                '-' => has_dash = true,
+                ':', '|', ' ', '\t', '\r' => {},
+                else => return false,
             }
         }
-        return (all_valid and has_dash);
+        return has_dash;
     }
 
     fn parseHtmlTag(parser: *OctomarkParser, text: []const u8) usize {
-        const _s = parser.startCall(.parseHtmlTag); defer parser.endCall(.parseHtmlTag, _s);
+        const _s = parser.startCall(.parseHtmlTag);
+        defer parser.endCall(.parseHtmlTag, _s);
         const len = text.len;
         if (len < 3 or text[0] != '<') return 0;
 
@@ -1165,7 +1168,8 @@ pub const OctomarkParser = struct {
     }
 
     fn splitTableRowCells(parser: *OctomarkParser, str: []const u8, cells: *[64][]const u8) usize {
-        const _s = parser.startCall(.splitTableRowCells); defer parser.endCall(.splitTableRowCells, _s);
+        const _s = parser.startCall(.splitTableRowCells);
+        defer parser.endCall(.splitTableRowCells, _s);
         var count: usize = 0;
         var cursor = std.mem.trim(u8, str, &std.ascii.whitespace);
         if (cursor.len > 0 and cursor[0] == '|') cursor = cursor[1..];
@@ -1174,16 +1178,19 @@ pub const OctomarkParser = struct {
             var end_offset: usize = 0;
             var found = false;
             var k: usize = 0;
-            while (k < cursor.len) : (k += 1) {
-                if (cursor[k] == '\\' and k + 1 < cursor.len) {
-                    k += 1;
-                    continue;
+            while (std.mem.indexOfScalar(u8, cursor[k..], '|')) |offset| {
+                const j = k + offset;
+                var backslashes: usize = 0;
+                var b = j;
+                while (b > 0 and cursor[b - 1] == '\\') : (b -= 1) {
+                    backslashes += 1;
                 }
-                if (cursor[k] == '|') {
-                    end_offset = k;
+                if (backslashes % 2 == 0) {
+                    end_offset = j;
                     found = true;
                     break;
                 }
+                k = j + 1;
             }
             if (!found) end_offset = cursor.len;
 
@@ -1202,13 +1209,17 @@ pub const OctomarkParser = struct {
     fn isBlockStartMarker(parser: *OctomarkParser, str: []const u8) bool {
         const _s = parser.startCall(.isBlockStartMarker);
         defer parser.endCall(.isBlockStartMarker, _s);
-        if (str.len >= 3 and std.mem.eql(u8, str[0..3], "```")) return true;
-        if (str.len >= 2 and std.mem.eql(u8, str[0..2], "$$")) return true;
-        if (str.len >= 1 and (str[0] == '#' or str[0] == ':')) return true;
-        if (str.len >= 2 and std.mem.eql(u8, str[0..2], "- ")) return true;
-        if (str.len >= 3 and std.ascii.isDigit(str[0]) and std.mem.eql(u8, str[1..3], ". ")) return true;
-        if (str.len >= 3 and (std.mem.eql(u8, str[0..3], "---") or std.mem.eql(u8, str[0..3], "***") or std.mem.eql(u8, str[0..3], "___"))) return true;
-        return false;
+        if (str.len == 0) return false;
+        switch (str[0]) {
+            '`' => return str.len >= 3 and std.mem.startsWith(u8, str, "```"),
+            '$' => return str.len >= 2 and std.mem.startsWith(u8, str, "$$"),
+            '#', ':' => return true,
+            '-' => return str.len >= 2 and (str[1] == ' ' or (str.len >= 3 and std.mem.startsWith(u8, str, "---"))),
+            '*' => return str.len >= 3 and std.mem.startsWith(u8, str, "***"),
+            '_' => return str.len >= 3 and std.mem.startsWith(u8, str, "___"),
+            '0'...'9' => return str.len >= 3 and std.mem.eql(u8, str[1..3], ". "),
+            else => return false,
+        }
     }
 
     fn writeTableAlignment(output: anytype, align_type: TableAlignment) !void {
