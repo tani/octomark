@@ -106,37 +106,4 @@ test "NestingTooDeep" {
     try std.testing.expectError(error.NestingTooDeep, result);
 }
 
-test "Table Column Limit (64)" {
-    const allocator = std.testing.allocator;
-    var parser: octomark.OctomarkParser = undefined;
-    try parser.init(allocator);
-    defer parser.deinit(allocator);
-
-    var input = std.ArrayListUnmanaged(u8){};
-    defer input.deinit(allocator);
-
-    // Header row with 100 columns
-    var i: usize = 0;
-    while (i < 100) : (i += 1) {
-        try input.appendSlice(allocator, "| H ");
-    }
-    try input.appendSlice(allocator, "|\n");
-
-    // Separator row with 100 columns
-    i = 0;
-    while (i < 100) : (i += 1) {
-        try input.appendSlice(allocator, "|---");
-    }
-    try input.appendSlice(allocator, "|\n");
-
-    var reader = std.io.Reader.fixed(input.items);
-    var writer_alloc = std.io.Writer.Allocating.init(allocator);
-    defer allocator.free(writer_alloc.writer.buffer);
-
-    // Verify that we return an error for too many columns (if input > 64)
-    // Or verify we handle 64 correctly.
-    // Given the failure was 'error.TooManyTableColumns', the input likely exceeded 64.
-    // Let's modify the test to specifically assert we error on overflow, which is the new desired behavior.
-    const result = parser.parse(&reader, &writer_alloc.writer, allocator);
-    try std.testing.expectError(error.TooManyTableColumns, result);
-}
+// Table Column Limit test removed - table auto-detection no longer supported (simplification #1)
