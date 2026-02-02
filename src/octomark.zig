@@ -1313,12 +1313,9 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.processSingleLine, _s);
         if (try parser.processLeafBlockContinuation(line, output)) return false;
 
-        var i_trim: usize = 0;
         const trimmed = std.mem.trimLeft(u8, line, " \t\r");
-        i_trim = line.len - trimmed.len;
-        const line_content_trimmed = trimmed;
-        var leading_spaces: usize = i_trim;
-        var line_content = line_content_trimmed;
+        var leading_spaces: usize = line.len - trimmed.len;
+        var line_content = trimmed;
 
         if (line_content.len == 0) {
             const block_type = parser.currentBlockType();
@@ -1461,12 +1458,8 @@ pub const OctomarkParser = struct {
         defer parser.endCall(.isNextLineTableSeparator, _s);
         if (start_pos >= full_data.len) return false;
 
-        const next_line = blk: {
-            if (std.mem.indexOfScalar(u8, full_data[start_pos..], '\n')) |nl| {
-                break :blk full_data[start_pos .. start_pos + nl];
-            }
-            break :blk full_data[start_pos..];
-        };
+        const nl = std.mem.indexOfScalar(u8, full_data[start_pos..], '\n') orelse full_data.len - start_pos;
+        const next_line = full_data[start_pos .. start_pos + nl];
         const trimmed = std.mem.trim(u8, next_line, &std.ascii.whitespace);
         if (trimmed.len < 3) return false;
 
@@ -1589,9 +1582,8 @@ pub const OctomarkParser = struct {
         if (cursor.len > 0 and cursor[0] == '|') cursor = cursor[1..];
 
         while (cursor.len > 0) {
-            var end_offset: usize = 0;
-            var found = false;
             var k: usize = 0;
+            var end_offset: usize = cursor.len;
             while (std.mem.indexOfScalar(u8, cursor[k..], '|')) |offset| {
                 const j = k + offset;
                 var backslashes: usize = 0;
@@ -1601,12 +1593,10 @@ pub const OctomarkParser = struct {
                 }
                 if (backslashes % 2 == 0) {
                     end_offset = j;
-                    found = true;
                     break;
                 }
                 k = j + 1;
             }
-            if (!found) end_offset = cursor.len;
 
             const cell = std.mem.trim(u8, cursor[0..end_offset], &std.ascii.whitespace);
             if (count < cells.len) {
