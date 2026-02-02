@@ -9,10 +9,10 @@
 - [x] HTML blocks: Type 1-6 classification.
 - [x] Hard line breaks: trailing spaces/backslash normalization.
 - [ ] List precision: refine tight/loose list detection to handle blank lines between nested items strictly.
-- [ ] Link robustness: support balanced parentheses in destinations `(url(nested))` and multi-line titles.
+- [x] Link robustness: support balanced parentheses in destinations `(url(nested))` and multi-line titles.
 - [ ] Unicode categories: expand `isPunct` and whitespace checks to support mandatory Unicode ranges via lookup tables.
-- [ ] HTML Block Type 7: detect generic HTML start/end tags as block-level markers (interrupting paragraphs).
-- [ ] GFM Task Lists: implement `[ ]` and `[x]` markers for list items.
-- [ ] GFM Strikethrough: fully integrate `~~` into the delimiter stack for spec-compliant nesting.
-- [ ] Image alt text parsing: ensure inline parsing is applied to image `alt` attributes.
-- [ ] Setext continuity: handle multi-line paragraph content preceding Setext underlines.
+- [x] HTML Block Type 7: detect generic HTML start/end tags as block-level markers (interrupting paragraphs).
+- [x] GFM Task Lists: implement `[ ]` and `[x]` markers for list items.
+- [x] GFM Strikethrough: fully integrate `~~` into the delimiter stack for spec-compliant nesting.
+- [x] Image alt text parsing: ensure inline parsing is applied to image `alt` attributes.
+- [x] Setext continuity: handle multi-line paragraph content preceding Setext underlines.
