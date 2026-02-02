@@ -931,8 +931,8 @@ pub const OctomarkParser = struct {
                 return true;
             }
         } else if (top == .indented_code) {
-            var spaces: usize = 0;
-            while (spaces < text_slice.len and text_slice[spaces] == ' ') : (spaces += 1) {}
+            const trimmed_spaces = std.mem.trimLeft(u8, text_slice, " ");
+            const spaces = text_slice.len - trimmed_spaces.len;
             const is_blank = (spaces == text_slice.len);
             if (!is_blank) {
                 if (spaces < 4) {
@@ -945,10 +945,12 @@ pub const OctomarkParser = struct {
 
         if (parser.stack_depth > 0) {
             const indent = parser.block_stack[parser.stack_depth - 1].indent_level;
-            var k: i32 = 0;
-            while (k < indent and text_slice.len > 0 and text_slice[0] == ' ') {
-                text_slice = text_slice[1..];
-                k += 1;
+            if (indent > 0 and text_slice.len > 0) {
+                const trimmed_spaces = std.mem.trimLeft(u8, text_slice, " ");
+                const spaces = text_slice.len - trimmed_spaces.len;
+                const indent_usize: usize = @intCast(indent);
+                const remove = if (spaces < indent_usize) spaces else indent_usize;
+                text_slice = text_slice[remove..];
             }
         }
 
@@ -960,12 +962,8 @@ pub const OctomarkParser = struct {
     fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
         const _s = parser.startCall(.parseFencedCodeBlock);
         defer parser.endCall(.parseFencedCodeBlock, _s);
-        var content = line_content;
-        var extra_spaces: usize = 0;
-        while (content.len > 0 and content[0] == ' ') {
-            extra_spaces += 1;
-            content = content[1..];
-        }
+        const content = std.mem.trimLeft(u8, line_content, " ");
+        const extra_spaces = line_content.len - content.len;
 
         if (content.len >= 3 and (std.mem.eql(u8, content[0..3], "```") or std.mem.eql(u8, content[0..3], "~~~"))) {
             const block_type = parser.currentBlockType();
@@ -994,12 +992,8 @@ pub const OctomarkParser = struct {
     fn parseMathBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
         const _s = parser.startCall(.parseMathBlock);
         defer parser.endCall(.parseMathBlock, _s);
-        var content = line_content;
-        var extra_spaces: usize = 0;
-        while (content.len > 0 and content[0] == ' ') {
-            extra_spaces += 1;
-            content = content[1..];
-        }
+        const content = std.mem.trimLeft(u8, line_content, " ");
+        const extra_spaces = line_content.len - content.len;
 
         if (content.len >= 2 and std.mem.eql(u8, content[0..2], "$$")) {
             const block_type = parser.currentBlockType();
@@ -1113,9 +1107,8 @@ pub const OctomarkParser = struct {
         var line = line_content.*;
         if (line.len == 0) return false;
 
-        var i: usize = 0;
-        while (i < line.len and line[i] == ' ') : (i += 1) {}
-        const internal_spaces = i;
+        const trimmed_line = std.mem.trimLeft(u8, line, " ");
+        const internal_spaces = line.len - trimmed_line.len;
 
         // Unordered list marker: -, *, +
         var is_ul = false;
@@ -1195,13 +1188,7 @@ pub const OctomarkParser = struct {
         if (parser.currentBlockType() == .table) {
             const trimmed_line = std.mem.trim(u8, line_content, &std.ascii.whitespace);
             // Quick pipe check for body row
-            var has_pipe = false;
-            for (trimmed_line) |c| {
-                if (c == '|') {
-                    has_pipe = true;
-                    break;
-                }
-            }
+            const has_pipe = std.mem.indexOfScalar(u8, trimmed_line, '|') != null;
 
             if (has_pipe) {
                 var body_cells: [64][]const u8 = undefined;
