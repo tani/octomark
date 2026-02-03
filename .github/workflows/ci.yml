@@ -27,8 +27,5 @@ jobs:
       - name: Build
         run: zig build
 
-      - name: Run Tests
-        run: zig build test
-
-      - name: Build Benchmark (ReleaseFast)
-        run: zig build -Doptimize=ReleaseFast bench
+      - name: Run Compliance Tests
+        run: ./scripts/compliance.sh
