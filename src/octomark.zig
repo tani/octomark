@@ -213,6 +213,22 @@ pub const OctomarkParser = struct {
         parseIndentedCodeBlock: C = .{},
         processLeafBlockContinuation: C = .{},
         processParagraph: C = .{},
+        init: C = .{},
+        deinit: C = .{},
+        setOptions: C = .{},
+        parse: C = .{},
+        pushBlockExtra: C = .{},
+        currentListBufferIndex: C = .{},
+        listItemStart: C = .{},
+        listItemEnd: C = .{},
+        listItemMarkBlock: C = .{},
+        listItemMarkParagraph: C = .{},
+        listItemRecordParagraphSpan: C = .{},
+        applyPendingLoose: C = .{},
+        findLabelEnd: C = .{},
+        parseInlineLink: C = .{},
+        labelHasLinkLike: C = .{},
+        parseInlineContentScoped: C = .{},
     };
     inline fn startCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats)) u64 {
         if (builtin.mode == .Debug) {
@@ -258,9 +274,13 @@ pub const OctomarkParser = struct {
         self.list_buffers.deinit(allocator);
     }
     pub fn setOptions(self: *OctomarkParser, options: OctomarkOptions) void {
+        const _s = self.startCall(.setOptions);
+        defer self.endCall(.setOptions, _s);
         self.options = options;
     }
     pub fn parse(self: *OctomarkParser, reader: anytype, writer: anytype, allocator: std.mem.Allocator) !void {
+        const _s = self.startCall(.parse);
+        defer self.endCall(.parse, _s);
         var buf: [65536]u8 = undefined;
         const R = if (@typeInfo(@TypeOf(reader)) == .pointer) std.meta.Child(@TypeOf(reader)) else @TypeOf(reader);
         while (true) {
@@ -373,9 +393,13 @@ pub const OctomarkParser = struct {
         while (self.stack_depth > 0) try self.renderTop(proxy);
     }
     fn pushBlock(p: *OctomarkParser, t: BlockType, i: i32) !void {
+        const _s = p.startCall(.pushBlock);
+        defer p.endCall(.pushBlock, _s);
         try p.pushBlockExtra(t, i, 0);
     }
     fn pushBlockExtra(p: *OctomarkParser, t: BlockType, i: i32, extra: u8) !void {
+        const _s = p.startCall(.pushBlockExtra);
+        defer p.endCall(.pushBlockExtra, _s);
         if (p.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
         p.block_stack[p.stack_depth] = .{ .block_type = t, .indent_level = i, .content_indent = i, .loose = false, .extra_type = extra };
         if (t == .unordered_list or t == .ordered_list) {
@@ -400,6 +424,8 @@ pub const OctomarkParser = struct {
         p.stack_depth += 1;
     }
     fn pop(p: *OctomarkParser) void {
+        const _s = p.startCall(.pop);
+        defer p.endCall(.pop, _s);
         if (p.stack_depth > 0) p.stack_depth -= 1;
     }
     fn topT(p: *const OctomarkParser) ?BlockType {
@@ -486,9 +512,13 @@ pub const OctomarkParser = struct {
         try writeAll(o, block_close_tags[@intFromEnum(t)]);
     }
     fn closeP(p: *OctomarkParser, o: anytype) !void {
+        const _s = p.startCall(.closeP);
+        defer p.endCall(.closeP, _s);
         if (p.topT() == .paragraph) try p.renderTop(o);
     }
     fn tryCloseLeaf(p: *OctomarkParser, o: anytype) !void {
+        const _s = p.startCall(.tryCloseLeaf);
+        defer p.endCall(.tryCloseLeaf, _s);
         const t = p.topT() orelse return;
         if (t == .paragraph or @intFromEnum(t) >= @intFromEnum(BlockType.code)) {
             try p.renderTop(o);
@@ -498,6 +528,8 @@ pub const OctomarkParser = struct {
         }
     }
     fn currentListBufferIndex(p: *OctomarkParser) ?usize {
+        const _s = p.startCall(.currentListBufferIndex);
+        defer p.endCall(.currentListBufferIndex, _s);
         if (p.stack_depth == 0) return null;
         var i = p.stack_depth;
         while (i > 0) {
@@ -513,6 +545,8 @@ pub const OctomarkParser = struct {
         return if (p.currentListBufferIndex()) |idx| &p.list_buffers.items[idx] else null;
     }
     fn listItemStart(p: *OctomarkParser) void {
+        const _s = p.startCall(.listItemStart);
+        defer p.endCall(.listItemStart, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
         lb.item_starts.append(p.allocator, lb.bytes.items.len) catch {};
@@ -520,21 +554,29 @@ pub const OctomarkParser = struct {
         lb.item_has_p.append(p.allocator, false) catch {};
     }
     fn listItemEnd(p: *OctomarkParser) void {
+        const _s = p.startCall(.listItemEnd);
+        defer p.endCall(.listItemEnd, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
         if (lb.item_ends.items.len < lb.item_starts.items.len) lb.item_ends.append(p.allocator, lb.bytes.items.len) catch {};
     }
     fn listItemMarkBlock(p: *OctomarkParser) void {
+        const _s = p.startCall(.listItemMarkBlock);
+        defer p.endCall(.listItemMarkBlock, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
         if (lb.item_has_block.items.len > 0) lb.item_has_block.items[lb.item_has_block.items.len - 1] = true;
     }
     fn listItemMarkParagraph(p: *OctomarkParser) void {
+        const _s = p.startCall(.listItemMarkParagraph);
+        defer p.endCall(.listItemMarkParagraph, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
         if (lb.item_has_p.items.len > 0) lb.item_has_p.items[lb.item_has_p.items.len - 1] = true;
     }
     fn listItemRecordParagraphSpan(p: *OctomarkParser, start: usize, end: usize) void {
+        const _s = p.startCall(.listItemRecordParagraphSpan);
+        defer p.endCall(.listItemRecordParagraphSpan, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
         if (lb.item_starts.items.len == 0 or end <= start) return;
@@ -543,6 +585,8 @@ pub const OctomarkParser = struct {
         lb.para_ends.append(p.allocator, end) catch {};
     }
     fn applyPendingLoose(p: *OctomarkParser, o: anytype) !void {
+        const _s = p.startCall(.applyPendingLoose);
+        defer p.endCall(.applyPendingLoose, _s);
         _ = o;
         if (p.pending_loose_idx) |idx| {
             if (idx < p.stack_depth) {
@@ -551,8 +595,9 @@ pub const OctomarkParser = struct {
             p.pending_loose_idx = null;
         }
     }
-    fn esc(p: *const OctomarkParser, text: []const u8, o: anytype) !void {
-        _ = p;
+    fn esc(p: *OctomarkParser, text: []const u8, o: anytype) !void {
+        const _s = p.startCall(.esc);
+        defer p.endCall(.esc, _s);
         var i: usize = 0;
         while (i < text.len) {
             if (std.mem.indexOfAny(u8, text[i..], "&<>\"'")) |off| {
@@ -681,6 +726,8 @@ pub const OctomarkParser = struct {
         return c == ' ' or c == '\t' or c == '\n' or c == '\r';
     }
     fn findLabelEnd(p: *OctomarkParser, text: []const u8, label_start: usize) ?usize {
+        const _s = p.startCall(.findLabelEnd);
+        defer p.endCall(.findLabelEnd, _s);
         var depth: usize = 1;
         var k = label_start;
         while (k < text.len) : (k += 1) {
@@ -810,6 +857,8 @@ pub const OctomarkParser = struct {
     }
     const LinkMatch = struct { label_start: usize, label_end: usize, dest: LinkDest, is_image: bool };
     fn parseInlineLink(p: *OctomarkParser, text: []const u8, start: usize, is_image: bool) ?LinkMatch {
+        const _s = p.startCall(.parseInlineLink);
+        defer p.endCall(.parseInlineLink, _s);
         if (is_image) {
             if (start + 1 >= text.len or text[start + 1] != '[') return null;
         } else if (text[start] != '[') return null;
@@ -848,6 +897,8 @@ pub const OctomarkParser = struct {
         return null;
     }
     fn labelHasLinkLike(p: *OctomarkParser, text: []const u8) bool {
+        const _s = p.startCall(.labelHasLinkLike);
+        defer p.endCall(.labelHasLinkLike, _s);
         var i: usize = 0;
         while (i < text.len) {
             const c = text[i];
@@ -950,6 +1001,8 @@ pub const OctomarkParser = struct {
         try p.parseInlineContentDepth(text, o, 0, 0, false);
     }
     fn parseInlineContentScoped(p: *OctomarkParser, text: []const u8, o: anytype, depth: usize, plain: bool) anyerror!void {
+        const _s = p.startCall(.parseInlineContentScoped);
+        defer p.endCall(.parseInlineContentScoped, _s);
         if (depth > MAX_INLINE_NESTING) {
             try writeAll(o, text);
             return;
@@ -2132,6 +2185,8 @@ pub const OctomarkParser = struct {
         try parser.paragraph_content.appendSlice(parser.allocator, line_content);
     }
     fn isBSM(p: *OctomarkParser, s: []const u8, ls: usize) bool {
+        const _s = p.startCall(.isBlockStartMarker);
+        defer p.endCall(.isBlockStartMarker, _s);
         if (ls > 3 or s.len == 0) return false;
         if (isThematicBreakLine(s)) return true;
         return switch (s[0]) {
