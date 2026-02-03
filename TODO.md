@@ -22,36 +22,36 @@
 - [x] Entity Null Char: handle `&#0;` replacement (Example 26).
 - [x] Entity in Attributes: fix entity decoding in link destinations, titles, and code info strings (Examples 32, 33, 34).
 
-## Remaining Compliance Failures (107 Tests)
+## Remaining Compliance Failures (102 Tests)
 
 Failed Examples (from latest compliance run):
 1. Backslash/Entity/References: 23, 25, 28, 33, 41, 194, 195, 196, 197, 198, 200, 202, 204, 205, 206, 207, 208, 209, 210, 212, 216, 217, 218, 219, 220.
-2. Lists: 261, 318, 319, 321, 327, 328.
+2. Lists: 319.
 3. Emphasis/Strong: 356, 475, 476, 482, 483.
 4. Inline links: 490, 492, 493, 494, 495, 496, 501, 503, 505, 510, 520, 521, 523, 524, 526, 528.
 5. Reference links/images (skipped by design): 529, 530, 531, 532, 533, 534, 535, 536, 537, 538, 539, 540, 541, 542, 543, 544, 545, 546, 547, 551, 552, 555, 556, 557, 558, 559, 560, 561, 562, 563, 564, 565, 566, 567, 568, 569, 570, 571, 572, 573, 575, 578, 579, 584, 585, 586, 587, 588, 589, 590, 591, 593, 594, 595.
 
 ## Updated Status (Feb 3, 2026)
 
-- Compliance run: 548 passed, 107 failed (target 80% = 520 passed achieved).
+- Compliance run: 553 passed, 102 failed (target 80% = 520 passed achieved).
 - [x] **Backslash Escapes**: handle `\\` + `\r` and `\r\n` hard breaks.
 - [x] **Block Quotes**: enforce `>` marker indent ≤ 3 columns; open on empty `>` lines.
 - [x] **Code Spans**: exact backtick-run matching; skip code spans while scanning link labels.
 - [x] **Fenced Code Blocks**: closing fence indent uses column count; entity decode in info string; tabs allowed in opening fence.
 - [x] **Emphasis**: allow split runs to form `<strong><em>` in cases like `***`.
 - [x] **Unicode Categories**: expanded punctuation/whitespace tables.
-- [ ] **Lists & List Items** (most remaining): fix indentation, blank-line tight/loose, nested list vs indented code, and container interruption rules.
+- [ ] **Lists & List Items** (most remaining): fix reference-definition handling inside lists (Example 319) or document skip.
 - [ ] **Inline Links**: tighten destination/title parsing (spaces/newlines/angle-bracket handling) to avoid false positives.
 - [x] **HTML Blocks**: fixed remaining Type 1/6/7 list/indent edge cases.
 
 ## Edge/Corner Cases to Fix
 
-- [ ] List tight/loose rendering still off in some cases (blank lines and nested blocks not retroactively loosening earlier items).
-- [ ] Indented code blocks inside list items (avoid extra leading space or paragraph handling).
+- [ ] Reference definitions inside lists are still emitted as paragraphs (Example 319).
+- [x] Indented code blocks inside list items (avoid extra leading space or paragraph handling).
 - [x] Empty list items and list continuation markers (`-`, `*`, `2.`) breaking list structure.
-- [ ] Nested list indentation with mixed indent widths.
-- [ ] List tight/loose retroactive rendering (Examples 318, 319, 321, 327, 328).
-- [ ] Blockquote + list continuation edge cases (Example 261).
+- [x] Nested list indentation with mixed indent widths.
+- [x] List tight/loose retroactive rendering (Examples 318, 321, 327, 328).
+- [x] Blockquote + list continuation edge cases (Examples 261, 262, 322, 323).
 
 ## Priority Order (Easy → Hard)
 

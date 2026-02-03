@@ -417,15 +417,10 @@ fn OutputProxy(comptime W: type) type {
         lb.para_ends.append(p.allocator, end) catch {};
         }
     fn applyPendingLoose(p: *OctomarkParser, o: anytype) !void {
+        _ = o;
         if (p.pending_loose_idx) |idx| {
             if (idx < p.stack_depth) {
                 p.block_stack[idx].loose = true;
-                if (p.paragraph_content.items.len > 0) {
-                    p.listItemMarkParagraph();
-                    try writeAll(o, "<p>");
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    p.paragraph_content.clearRetainingCapacity();
-                    try writeAll(o, "</p>\n"); }
             }
             p.pending_loose_idx = null; }
     }
@@ -1443,8 +1438,6 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
             break :blk false;
         };
         if (is_ul or is_ol) {
-            if (parser.pending_loose_idx != null) {
-                try parser.applyPendingLoose(output); }
             const rem_check = std.mem.trimLeft(u8, line[internal_spaces + marker_bytes ..], " \t");
             if (rem_check.len == 0 and (parser.topT() == .paragraph or parser.paragraph_content.items.len > 0)) {
                 var in_list = false;
@@ -1485,6 +1478,11 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                 if (current_indent > tli + 3 and current_indent < tlc) {
                     return false; }
             }
+            const pre_block_type = parser.topT();
+            if (pre_block_type == .paragraph or pre_block_type == .table or pre_block_type == .code or
+                pre_block_type == .math)
+            {
+                try parser.renderTop(output); }
             while (parser.stack_depth > 0 and
                 parser.topT() != null and @intFromEnum(parser.topT().?) < @intFromEnum(BlockType.blockquote) and
                 (parser.block_stack[parser.stack_depth - 1].indent_level > normalized_indent or
@@ -1492,9 +1490,24 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                         (parser.topT() != target_type or parser.block_stack[parser.stack_depth - 1].extra_type !=
                         target_marker))))
             {
-                try parser.renderTop(output); }
-            const block_type = parser.topT();
-            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                if (parser.pending_loose_idx) |idx| {
+                    const top_idx = parser.stack_depth - 1;
+                    if (idx == top_idx) {
+                        const closing_indent = parser.block_stack[top_idx].indent_level;
+                        if (closing_indent > normalized_indent) {
+                            var outer: ?usize = null;
+                            var j: usize = top_idx;
+                            while (j > 0) {
+                                j -= 1;
+                                const bt = parser.block_stack[j].block_type;
+                                if (bt == .unordered_list or bt == .ordered_list) {
+                                    outer = j;
+                                    break; }
+                            }
+                            parser.pending_loose_idx = outer;
+                        }
+                    }
+                }
                 try parser.renderTop(output); }
             const top = parser.topT();
             const list_loose = (top == .unordered_list or top == .ordered_list) and
@@ -1729,11 +1742,25 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                 var i = p.stack_depth;
                 while (i > 0) {
                     i -= 1;
-                    if (p.block_stack[i].block_type == .unordered_list or p.block_stack[i].block_type == .ordered_list)
-                    {
+                    const bt = p.block_stack[i].block_type;
+                    if (bt == .unordered_list or bt == .ordered_list) {
                         l_idx = i;
                         break; }
                 }
+            }
+            if (l_idx != null and p.paragraph_content.items.len > 0) {
+                const list_loose = p.block_stack[l_idx.?].loose;
+                if (list_loose) {
+                    p.listItemMarkParagraph();
+                    try writeAll(o, "<p>");
+                    try p.parseInlineContent(p.paragraph_content.items, o);
+                    p.paragraph_content.clearRetainingCapacity();
+                    try writeAll(o, "</p>\n");
+                } else {
+                    const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
+                    try p.parseInlineContent(p.paragraph_content.items, o);
+                    if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
+                    p.paragraph_content.clearRetainingCapacity(); }
             }
             if (l_idx) |idx| {
                 p.pending_loose_idx = idx; }
@@ -1783,16 +1810,41 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                     break; }
             }
         }
-        if (q_lv > 0 and prev_blank) {
-            const remove = if (ls > 3) 3 else ls;
-            ls -= remove; }
+        var cur_q: usize = 0;
+        for (p.block_stack[0..p.stack_depth]) |e| {
+            if (e.block_type == .blockquote) cur_q += 1; }
+        if (q_lv > 0) {
+            var remove: usize = 0;
+            if (cur_q > 0) {
+                remove = if (ls > 3) 3 else ls;
+            } else {
+                var list_content_indent: ?usize = null;
+                if (p.stack_depth > 0) {
+                    var i = p.stack_depth;
+                    while (i > 0) {
+                        i -= 1;
+                        const bt = p.block_stack[i].block_type;
+                        if (bt == .unordered_list or bt == .ordered_list) {
+                            list_content_indent = @intCast(p.block_stack[i].content_indent);
+                            break; }
+                    }
+                }
+                if (list_content_indent) |lci| {
+                    if (ls >= lci) {
+                        const extra = ls - lci;
+                        if (extra > 0) remove = if (extra > 3) 3 else extra;
+                    } else {
+                        remove = if (ls > 3) 3 else ls;
+                    }
+                } else {
+                    remove = if (ls > 3) 3 else ls;
+                }
+            }
+            if (remove > 0) ls -= remove; }
         ls += ex_id;
         const p_id = leadingIndent(lc);
         ls += p_id.columns;
         lc = lc[p_id.idx..];
-        var cur_q: usize = 0;
-        for (p.block_stack[0..p.stack_depth]) |e| {
-            if (e.block_type == .blockquote) cur_q += 1; }
         var lazy = false;
         if (q_lv < cur_q and p.topT() == .paragraph) {
             if (!p.isBSM(lc, ls)) {
@@ -1828,6 +1880,20 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                         l_idx = i;
                         break; }
                 }
+            }
+            if (l_idx != null and p.paragraph_content.items.len > 0) {
+                const list_loose = p.block_stack[l_idx.?].loose;
+                if (list_loose) {
+                    p.listItemMarkParagraph();
+                    try writeAll(o, "<p>");
+                    try p.parseInlineContent(p.paragraph_content.items, o);
+                    p.paragraph_content.clearRetainingCapacity();
+                    try writeAll(o, "</p>\n");
+                } else {
+                    const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
+                    try p.parseInlineContent(p.paragraph_content.items, o);
+                    if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
+                    p.paragraph_content.clearRetainingCapacity(); }
             }
             if (l_idx) |idx| {
                 const suppress = bq_idx != null and bq_idx.? > idx;
@@ -1873,25 +1939,6 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                         continue; }
                 }
                 break; }
-        }
-        if (p.pending_loose_idx != null) {
-            var list_idx: ?usize = null;
-            var list_content_indent: usize = 0;
-            var list_indent: usize = 0;
-            if (p.stack_depth > 0) {
-                var i = p.stack_depth;
-                while (i > 0) {
-                    i -= 1;
-                    const blk_t = p.block_stack[i].block_type;
-                    if (blk_t == .unordered_list or blk_t == .ordered_list) {
-                        list_idx = i;
-                        list_content_indent = @intCast(p.block_stack[i].content_indent);
-                        list_indent = @intCast(p.block_stack[i].indent_level);
-                        break; }
-                }
-            }
-            if (is_list or (list_idx != null and ls >= list_content_indent)) {
-                try p.applyPendingLoose(o); }
         }
         var list_idx: ?usize = null;
         var list_content_indent: usize = 0;
@@ -1939,10 +1986,33 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                         while (p.stack_depth > mi) try p.renderTop(o);
                         break; }
                     if (ls < @as(usize, @intCast(e.content_indent)) and !lazy and !is_list and !is_dl and !list_lazy) {
+                        if (p.pending_loose_idx) |idx| {
+                            if (idx == mi) {
+                                var outer: ?usize = null;
+                                var j: usize = mi;
+                                while (j > 0) {
+                                    j -= 1;
+                                    const bt = p.block_stack[j].block_type;
+                                    if (bt == .unordered_list or bt == .ordered_list) {
+                                        outer = j;
+                                        break; }
+                                }
+                                p.pending_loose_idx = outer;
+                            }
+                        }
                         while (p.stack_depth > mi) try p.renderTop(o);
                         break; }
                 }
                 mi += 1; }
+            if (p.pending_loose_idx) |idx| {
+                if (idx < p.stack_depth) {
+                    const entry = p.block_stack[idx];
+                    const entry_content: usize = @intCast(entry.content_indent);
+                    if (is_list or ls >= entry_content) {
+                        try p.applyPendingLoose(o); }
+                } else {
+                    p.pending_loose_idx = null; }
+            }
             if (ls <= 3 and isThematicBreakLine(lc)) {
                 if (p.stack_depth > 0) {
                     var l_id: ?i32 = null;
