@@ -1493,48 +1493,31 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                         target_marker))))
             {
                 try parser.renderTop(output); }
+            const block_type = parser.topT();
+            if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
+                try parser.renderTop(output); }
             const top = parser.topT();
             const list_loose = (top == .unordered_list or top == .ordered_list) and
             parser.block_stack[parser.stack_depth - 1].loose;
+            if (parser.paragraph_content.items.len > 0) {
+                if (list_loose and parser.topT() != .paragraph) {
+                    parser.listItemMarkParagraph();
+                    try writeAll(output, "<p>");
+                    try parser.parseInlineContent(parser.paragraph_content.items, output);
+                    parser.paragraph_content.clearRetainingCapacity();
+                    try writeAll(output, "</p>\n");
+                } else {
+                    const start_pos = if (parser.currentListBuffer()) |lb| lb.bytes.items.len else 0;
+                    try parser.parseInlineContent(parser.paragraph_content.items, output);
+                    if (parser.currentListBuffer()) |lb| parser.listItemRecordParagraphSpan(start_pos,
+                    lb.bytes.items.len);
+                    parser.paragraph_content.clearRetainingCapacity(); }
+            }
             if (top == target_type and parser.block_stack[parser.stack_depth - 1].indent_level == normalized_indent) {
-                const block_type = parser.topT();
-                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-                    try parser.renderTop(output); }
-                if (parser.paragraph_content.items.len > 0) {
-                    if (list_loose and parser.topT() != .paragraph) {
-                        parser.listItemMarkParagraph();
-                        try writeAll(output, "<p>");
-                        try parser.parseInlineContent(parser.paragraph_content.items, output);
-                        parser.paragraph_content.clearRetainingCapacity();
-                        try writeAll(output, "</p>\n");
-                    } else {
-                        const start_pos = if (parser.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                        try parser.parseInlineContent(parser.paragraph_content.items, output);
-                        if (parser.currentListBuffer()) |lb| parser.listItemRecordParagraphSpan(start_pos,
-                        lb.bytes.items.len);
-                        parser.paragraph_content.clearRetainingCapacity(); }
-                }
                 parser.listItemEnd();
                 try writeAll(output, "</li>\n<li>");
                 parser.listItemStart();
             } else {
-                const block_type = parser.topT();
-                if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
-                    try parser.renderTop(output); }
-                if (parser.paragraph_content.items.len > 0) {
-                    if (list_loose and parser.topT() != .paragraph) {
-                        parser.listItemMarkParagraph();
-                        try writeAll(output, "<p>");
-                        try parser.parseInlineContent(parser.paragraph_content.items, output);
-                        parser.paragraph_content.clearRetainingCapacity();
-                        try writeAll(output, "</p>\n");
-                    } else {
-                        const start_pos = if (parser.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                        try parser.parseInlineContent(parser.paragraph_content.items, output);
-                        if (parser.currentListBuffer()) |lb| parser.listItemRecordParagraphSpan(start_pos,
-                        lb.bytes.items.len);
-                        parser.paragraph_content.clearRetainingCapacity(); }
-                }
                 if (target_type == .unordered_list) {
                     try writeAll(output, "<ul>\n<li>");
                     try parser.pushBlockExtra(target_type, current_indent, target_marker);
