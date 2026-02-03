@@ -1009,10 +1009,15 @@ pub const OctomarkParser = struct {
         }
         const saved_reps = p.replacements;
         const saved_delim_len = p.delimiter_stack_len;
-        var local_reps: std.ArrayList(Replacement) = .{};
-        defer local_reps.deinit(p.allocator);
-        p.replacements = local_reps;
+
+        p.replacements = .{};
         p.delimiter_stack_len = 0;
+        defer {
+            p.replacements.deinit(p.allocator);
+            p.replacements = saved_reps;
+            p.delimiter_stack_len = saved_delim_len;
+        }
+
         try p.scanInline(text, 0);
         std.sort.block(Replacement, p.replacements.items, {}, struct {
             fn less(_: void, a: Replacement, b: Replacement) bool {
@@ -1020,8 +1025,6 @@ pub const OctomarkParser = struct {
             }
         }.less);
         try p.renderInline(text, p.replacements.items, o, depth, 0, plain);
-        p.replacements = saved_reps;
-        p.delimiter_stack_len = saved_delim_len;
     }
     fn parseInlineContentDepth(p: *OctomarkParser, text: []const u8, o: anytype, depth: usize, g_off: usize, plain: bool) anyerror!void {
         const _s = p.startCall(.parseInlineContent);
