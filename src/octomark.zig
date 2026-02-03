@@ -101,6 +101,7 @@ const html_escape_map = blk: {
 };
 
 fn leadingIndent(line: []const u8) struct { idx: usize, columns: usize } {
+    if (line.len == 0 or (line[0] != ' ' and line[0] != '\t' and line[0] != '\r')) return .{ .idx = 0, .columns = 0 };
     var idx: usize = 0;
     var columns: usize = 0;
     while (idx < line.len) : (idx += 1) switch (line[idx]) {
@@ -153,17 +154,24 @@ pub const OctomarkParser = struct {
     pending_task_marker: u8 = 0,
     pending_loose_idx: ?usize = null,
     prev_line_blank: bool = false,
-    list_buffers: std.ArrayList(ListBuffer) = undefined,
+    active_list_idx: i32 = -1,
+    list_buffers: std.ArrayListUnmanaged(ListBuffer) = .{},
     timer: if (builtin.mode == .Debug) std.time.Timer else struct {} = undefined,
+    const ItemMetadata = struct {
+        start: usize,
+        end: usize = 0,
+        has_block: bool = false,
+        has_p: bool = false,
+    };
+    const ParaMetadata = struct {
+        item_idx: usize,
+        start: usize,
+        end: usize,
+    };
     const ListBuffer = struct {
-        bytes: std.ArrayList(u8),
-        item_starts: std.ArrayList(usize),
-        item_ends: std.ArrayList(usize),
-        item_has_block: std.ArrayList(bool),
-        item_has_p: std.ArrayList(bool),
-        para_item: std.ArrayList(usize),
-        para_starts: std.ArrayList(usize),
-        para_ends: std.ArrayList(usize),
+        bytes: std.ArrayListUnmanaged(u8),
+        items: std.ArrayListUnmanaged(ItemMetadata),
+        paras: std.ArrayListUnmanaged(ParaMetadata),
     };
     const Delimiter = struct {
         pos: usize,
@@ -250,6 +258,7 @@ pub const OctomarkParser = struct {
             .replacements = .{},
             .pending_task_marker = 0,
             .pending_loose_idx = null,
+            .active_list_idx = -1,
             .list_buffers = .{},
         };
         if (builtin.mode == .Debug) self.timer = try std.time.Timer.start();
@@ -263,13 +272,8 @@ pub const OctomarkParser = struct {
         self.replacements.deinit(allocator);
         for (self.list_buffers.items) |*lb| {
             lb.bytes.deinit(allocator);
-            lb.item_starts.deinit(allocator);
-            lb.item_ends.deinit(allocator);
-            lb.item_has_block.deinit(allocator);
-            lb.item_has_p.deinit(allocator);
-            lb.para_item.deinit(allocator);
-            lb.para_starts.deinit(allocator);
-            lb.para_ends.deinit(allocator);
+            lb.items.deinit(allocator);
+            lb.paras.deinit(allocator);
         }
         self.list_buffers.deinit(allocator);
     }
@@ -407,17 +411,13 @@ pub const OctomarkParser = struct {
             const idx = self_list_buf_idx: {
                 try p.list_buffers.append(p.allocator, .{
                     .bytes = .{},
-                    .item_starts = .{},
-                    .item_ends = .{},
-                    .item_has_block = .{},
-                    .item_has_p = .{},
-                    .para_item = .{},
-                    .para_starts = .{},
-                    .para_ends = .{},
+                    .items = .{},
+                    .paras = .{},
                 });
                 break :self_list_buf_idx p.list_buffers.items.len - 1;
             };
             p.block_stack[p.stack_depth].buffer_index = @intCast(idx);
+            p.active_list_idx = @intCast(idx);
         } else if (t != .paragraph) {
             p.listItemMarkBlock();
         }
@@ -426,7 +426,22 @@ pub const OctomarkParser = struct {
     fn pop(p: *OctomarkParser) void {
         const _s = p.startCall(.pop);
         defer p.endCall(.pop, _s);
-        if (p.stack_depth > 0) p.stack_depth -= 1;
+        if (p.stack_depth > 0) {
+            const popped = p.block_stack[p.stack_depth - 1];
+            p.stack_depth -= 1;
+            if (popped.block_type == .unordered_list or popped.block_type == .ordered_list) {
+                p.active_list_idx = -1;
+                var i = p.stack_depth;
+                while (i > 0) {
+                    i -= 1;
+                    const e = p.block_stack[i];
+                    if ((e.block_type == .unordered_list or e.block_type == .ordered_list) and e.buffer_index >= 0) {
+                        p.active_list_idx = e.buffer_index;
+                        break;
+                    }
+                }
+            }
+        }
     }
     fn topT(p: *const OctomarkParser) ?BlockType {
         return if (p.stack_depth > 0) p.block_stack[p.stack_depth - 1].block_type else null;
@@ -460,29 +475,28 @@ pub const OctomarkParser = struct {
             const close_tag = block_close_tags[@intFromEnum(t)];
             const lb_idx: usize = @intCast(p.block_stack[p.stack_depth - 1].buffer_index);
             var lb = &p.list_buffers.items[lb_idx];
-            if (lb.item_ends.items.len < lb.item_starts.items.len) try lb.item_ends.append(p.allocator, lb.bytes.items.len);
+            if (lb.items.items.len > 0) {
+                var last_item = &lb.items.items[lb.items.items.len - 1];
+                if (last_item.end == 0) last_item.end = lb.bytes.items.len;
+            }
             p.pop();
-            if (list_loose and lb.para_starts.items.len == lb.para_ends.items.len and lb.para_starts.items.len > 0) {
-                var rebuilt: Buffer = .{};
-                defer rebuilt.deinit(p.allocator);
+            if (list_loose and lb.paras.items.len > 0) {
                 var cursor: usize = 0;
                 var i: usize = 0;
-                while (i < lb.para_starts.items.len) : (i += 1) {
-                    const start = lb.para_starts.items[i];
-                    const end = lb.para_ends.items[i];
-                    if (start < cursor or end < start or end > lb.bytes.items.len) {
-                        try writeAll(o, lb.bytes.items);
-                        try writeAll(o, close_tag);
-                        return;
+                while (i < lb.paras.items.len) : (i += 1) {
+                    const p_meta = lb.paras.items[i];
+                    if (p_meta.start < cursor or p_meta.end < p_meta.start or p_meta.end > lb.bytes.items.len) {
+                        try writeAll(o, lb.bytes.items[cursor..]);
+                        cursor = lb.bytes.items.len;
+                        break;
                     }
-                    try rebuilt.appendSlice(p.allocator, lb.bytes.items[cursor..start]);
-                    try rebuilt.appendSlice(p.allocator, "<p>");
-                    try rebuilt.appendSlice(p.allocator, lb.bytes.items[start..end]);
-                    try rebuilt.appendSlice(p.allocator, "</p>\n");
-                    cursor = end;
+                    try writeAll(o, lb.bytes.items[cursor..p_meta.start]);
+                    try writeAll(o, "<p>");
+                    try writeAll(o, lb.bytes.items[p_meta.start..p_meta.end]);
+                    try writeAll(o, "</p>\n");
+                    cursor = p_meta.end;
                 }
-                if (cursor < lb.bytes.items.len) try rebuilt.appendSlice(p.allocator, lb.bytes.items[cursor..]);
-                try writeAll(o, rebuilt.items);
+                if (cursor < lb.bytes.items.len) try writeAll(o, lb.bytes.items[cursor..]);
                 try writeAll(o, close_tag);
             } else {
                 try writeAll(o, lb.bytes.items);
@@ -530,16 +544,7 @@ pub const OctomarkParser = struct {
     fn currentListBufferIndex(p: *OctomarkParser) ?usize {
         const _s = p.startCall(.currentListBufferIndex);
         defer p.endCall(.currentListBufferIndex, _s);
-        if (p.stack_depth == 0) return null;
-        var i = p.stack_depth;
-        while (i > 0) {
-            i -= 1;
-            const e = p.block_stack[i];
-            if ((e.block_type == .unordered_list or e.block_type == .ordered_list) and e.buffer_index >= 0) {
-                return @intCast(e.buffer_index);
-            }
-        }
-        return null;
+        return if (p.active_list_idx >= 0) @intCast(p.active_list_idx) else null;
     }
     fn currentListBuffer(p: *OctomarkParser) ?*ListBuffer {
         return if (p.currentListBufferIndex()) |idx| &p.list_buffers.items[idx] else null;
@@ -549,40 +554,43 @@ pub const OctomarkParser = struct {
         defer p.endCall(.listItemStart, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        lb.item_starts.append(p.allocator, lb.bytes.items.len) catch {};
-        lb.item_has_block.append(p.allocator, false) catch {};
-        lb.item_has_p.append(p.allocator, false) catch {};
+        lb.items.append(p.allocator, .{ .start = lb.bytes.items.len }) catch {};
     }
     fn listItemEnd(p: *OctomarkParser) void {
         const _s = p.startCall(.listItemEnd);
         defer p.endCall(.listItemEnd, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.item_ends.items.len < lb.item_starts.items.len) lb.item_ends.append(p.allocator, lb.bytes.items.len) catch {};
+        if (lb.items.items.len > 0) {
+            var item = &lb.items.items[lb.items.items.len - 1];
+            if (item.end == 0) item.end = lb.bytes.items.len;
+        }
     }
     fn listItemMarkBlock(p: *OctomarkParser) void {
         const _s = p.startCall(.listItemMarkBlock);
         defer p.endCall(.listItemMarkBlock, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.item_has_block.items.len > 0) lb.item_has_block.items[lb.item_has_block.items.len - 1] = true;
+        if (lb.items.items.len > 0) lb.items.items[lb.items.items.len - 1].has_block = true;
     }
     fn listItemMarkParagraph(p: *OctomarkParser) void {
         const _s = p.startCall(.listItemMarkParagraph);
         defer p.endCall(.listItemMarkParagraph, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.item_has_p.items.len > 0) lb.item_has_p.items[lb.item_has_p.items.len - 1] = true;
+        if (lb.items.items.len > 0) lb.items.items[lb.items.items.len - 1].has_p = true;
     }
     fn listItemRecordParagraphSpan(p: *OctomarkParser, start: usize, end: usize) void {
         const _s = p.startCall(.listItemRecordParagraphSpan);
         defer p.endCall(.listItemRecordParagraphSpan, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.item_starts.items.len == 0 or end <= start) return;
-        lb.para_item.append(p.allocator, lb.item_starts.items.len - 1) catch {};
-        lb.para_starts.append(p.allocator, start) catch {};
-        lb.para_ends.append(p.allocator, end) catch {};
+        if (lb.items.items.len == 0 or end <= start) return;
+        lb.paras.append(p.allocator, .{
+            .item_idx = lb.items.items.len - 1,
+            .start = start,
+            .end = end,
+        }) catch {};
     }
     fn applyPendingLoose(p: *OctomarkParser, o: anytype) !void {
         const _s = p.startCall(.applyPendingLoose);
@@ -2191,12 +2199,11 @@ pub const OctomarkParser = struct {
         const _s = p.startCall(.isBlockStartMarker);
         defer p.endCall(.isBlockStartMarker, _s);
         if (ls > 3 or s.len == 0) return false;
-        if (isThematicBreakLine(s)) return true;
         return switch (s[0]) {
             '`' => s.len >= 3 and std.mem.startsWith(u8, s, "```"),
             '$' => s.len >= 2 and std.mem.startsWith(u8, s, "$$"),
             '#', ':', '<', '|' => true,
-            '-', '*', '_' => s.len == 1 or (s.len >= 2 and (s[1] == ' ' or s[1] == '\t')),
+            '-', '*', '_' => isThematicBreakLine(s) or s.len == 1 or (s.len >= 2 and (s[1] == ' ' or s[1] == '\t')),
             '0'...'9' => blk: {
                 var j: usize = 1;
                 while (j < s.len and std.ascii.isDigit(s[j])) : (j += 1) {}
