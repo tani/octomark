@@ -1067,6 +1067,24 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
             const stripped = parser.stripBlockquotePrefixes(line);
             if (!stripped.ok) return false;
             var text_slice = stripped.slice;
+            var list_indent: ?usize = null;
+            if (parser.stack_depth > 0) {
+                var li = parser.stack_depth;
+                while (li > 0) {
+                    li -= 1;
+                    const bt = parser.block_stack[li].block_type;
+                    if (bt == .unordered_list or bt == .ordered_list) {
+                        list_indent = @intCast(parser.block_stack[li].content_indent);
+                        break; }
+                }
+            }
+            if (list_indent) |li| {
+                const ind = leadingIndent(text_slice);
+                if (ind.columns < li) {
+                    try parser.renderTop(output);
+                    return false; }
+                text_slice = stripIndentColumns(text_slice, li);
+            }
             if (h_type >= 6) {
                 if (std.mem.trim(u8, text_slice, " \t").len == 0) {
                     try parser.renderTop(output);
@@ -1786,7 +1804,6 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
             const remove = if (ls > 3) 3 else ls;
             ls -= remove; }
         ls += ex_id;
-        const lc_ws = lc;
         const p_id = leadingIndent(lc);
         ls += p_id.columns;
         lc = lc[p_id.idx..];
@@ -1926,6 +1943,8 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
         var parse_ls = ls;
         if (list_idx != null and !is_list and !is_dl and ls >= list_content_indent) {
             parse_ls = ls - list_content_indent; }
+        var html_ls = ls;
+        if (list_idx != null and ls >= list_content_indent) html_ls = ls - list_content_indent;
         const force_close_empty = prev_blank and list_idx != null and !is_list and !is_dl and
         p.block_stack[list_idx.?].pending_empty_item;
         if (lc.len > 0) {
@@ -2031,18 +2050,17 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                         }
                     }
                 },
-                '<' => if (lc.len >= 3 and ls <= 3) {
+                '<' => if (lc.len >= 3 and html_ls <= 3) {
                     var h_t: u8 = 0;
                     if (lc.len >= 4 and lc[1] == '!') {
                         if (std.mem.startsWith(u8, lc, "<!--")) h_t = 2 else if
                             (std.mem.startsWith(u8, lc, "<![CDATA[")) h_t = 5 else h_t = 4;
                     } else if (lc.len >= 2 and lc[1] == '?') h_t = 3 else {
-                        const tr = if (lc[1] == '/') lc[2..] else lc[1..];
+                        const is_close = lc.len >= 2 and lc[1] == '/';
+                        const tr = if (is_close) lc[2..] else lc[1..];
                         const t1 = [_][]const u8{ "script", "pre", "style", "textarea" };
-                        for (t1) |t| if (std.mem.startsWith(u8, tr, t)) {
-                            if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
-                                h_t = 1;
-                                break; }
+                        if (!is_close) for (t1) |t| if (std.mem.startsWith(u8, tr, t)) {
+                            if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) { h_t = 1; break; }
                         };
                         if (h_t == 0) {
                             const t6 = [_][]const u8{
@@ -2071,17 +2089,19 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                     if (h_t > 0) {
                         try p.tryCloseLeaf(o);
                         try p.pushBlockExtra(.html_block, 0, h_t);
-                        try writeAll(o, lc_ws);
+                        var pad: usize = 0;
+                        while (pad < html_ls) : (pad += 1) try writeByte(o, ' ');
+                        try writeAll(o, lc);
                         try writeByte(o, '\n');
                         var term = false;
                         if (h_t == 1) {
                             const tags = [_][]const u8{ "</script>", "</pre>", "</style>", "</textarea>" };
                             var i: usize = 0;
-                            while (i < lc_ws.len) : (i += 1) {
-                                if (lc_ws[i] == '<' and i + 1 < lc_ws.len and lc_ws[i + 1] == '/') {
+                            while (i < lc.len) : (i += 1) {
+                                if (lc[i] == '<' and i + 1 < lc.len and lc[i + 1] == '/') {
                                     for (tags) |tag| {
-                                        if (i + tag.len <= lc_ws.len) {
-                                            if (std.ascii.eqlIgnoreCase(lc_ws[i .. i + tag.len], tag)) {
+                                        if (i + tag.len <= lc.len) {
+                                            if (std.ascii.eqlIgnoreCase(lc[i .. i + tag.len], tag)) {
                                                 term = true;
                                                 break; }
                                         }
@@ -2089,13 +2109,13 @@ fn parseDefinitionTerm(parser: *OctomarkParser, line_content: []const u8, full_d
                                 }
                                 if (term) break; }
                         } else if (h_t == 2) {
-                            if (std.mem.indexOf(u8, lc_ws, "-->") != null) term = true;
+                            if (std.mem.indexOf(u8, lc, "-->") != null) term = true;
                         } else if (h_t == 3) {
-                            if (std.mem.indexOf(u8, lc_ws, "?>") != null) term = true;
+                            if (std.mem.indexOf(u8, lc, "?>") != null) term = true;
                         } else if (h_t == 4) {
-                            if (std.mem.indexOf(u8, lc_ws, ">") != null) term = true;
+                            if (std.mem.indexOf(u8, lc, ">") != null) term = true;
                         } else if (h_t == 5) {
-                            if (std.mem.indexOf(u8, lc_ws, "]]>") != null) term = true; }
+                            if (std.mem.indexOf(u8, lc, "]]>") != null) term = true; }
                         if (term) try p.renderTop(o);
                         return false; }
                 },
