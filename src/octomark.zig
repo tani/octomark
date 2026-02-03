@@ -34,8 +34,9 @@ const punct_symbol_ranges = [_][2]u32{
     .{ 0x27F0, 0x27FF }, .{ 0x2800, 0x28FF }, .{ 0x2900, 0x297F }, .{ 0x2980, 0x29FF },
     .{ 0x2A00, 0x2AFF }, .{ 0x2B00, 0x2BFF }, .{ 0x2E00, 0x2E7F }, .{ 0x3000, 0x303F },
     .{ 0xFE10, 0xFE1F }, .{ 0xFE30, 0xFE4F }, .{ 0xFE50, 0xFE6F }, .{ 0xFF00, 0xFFEF },
-    .{ 0x1F300, 0x1F5FF }, .{ 0x1F600, 0x1F64F }, .{ 0x1F680, 0x1F6FF }, .{ 0x1F700, 0x1F77F },
-    .{ 0x1F780, 0x1F7FF }, .{ 0x1F800, 0x1F8FF }, .{ 0x1F900, 0x1F9FF }, .{ 0x1FA00, 0x1FAFF },
+    .{ 0x1E2C0, 0x1E2FF }, .{ 0x1F300, 0x1F5FF }, .{ 0x1F600, 0x1F64F }, .{ 0x1F680, 0x1F6FF },
+    .{ 0x1F700, 0x1F77F }, .{ 0x1F780, 0x1F7FF }, .{ 0x1F800, 0x1F8FF }, .{ 0x1F900, 0x1F9FF },
+    .{ 0x1FA00, 0x1FAFF },
 };
 const html_escape_map = blk: {
     var map = [_]?[]const u8{null} ** 256;
@@ -65,7 +66,8 @@ fn stripIndentColumns(line: []const u8, columns: usize) []const u8 {
         '\r' => col += 1,
         else => break,
     };
-    return line[idx..]; }
+    return line[idx..];
+}
 fn isThematicBreakLine(line: []const u8) bool {
     var marker: u8 = 0;
     var count: usize = 0;
@@ -73,14 +75,20 @@ fn isThematicBreakLine(line: []const u8) bool {
         if (c == ' ' or c == '\t') continue;
         if (c != '*' and c != '-' and c != '_') return false;
         if (marker == 0) marker = c else if (c != marker) return false;
-        count += 1; }
-    return count >= 3; }
+        count += 1;
+    }
+    return count >= 3;
+}
 pub const OctomarkParser = struct {
-    table_alignments: [64]TableAlignment = [_]TableAlignment{.none} ** 64, table_column_count: usize = 0,
-    block_stack: [MAX_BLOCK_NESTING]BlockEntry = undefined, stack_depth: usize = 0, pending_buffer: Buffer = .{},
+    table_alignments: [64]TableAlignment = [_]TableAlignment{ .none } ** 64,
+    table_column_count: usize = 0,
+    block_stack: [MAX_BLOCK_NESTING]BlockEntry = undefined,
+    stack_depth: usize = 0,
+    pending_buffer: Buffer = .{},
     paragraph_content: std.ArrayList(u8) = undefined,
     pending_code_blank_lines: std.ArrayList(usize) = undefined,
-    delimiter_stack: [MAX_INLINE_NESTING]Delimiter = undefined, delimiter_stack_len: usize = 0,
+    delimiter_stack: [MAX_INLINE_NESTING]Delimiter = undefined,
+    delimiter_stack_len: usize = 0,
     replacements: std.ArrayList(Replacement) = undefined,
     allocator: std.mem.Allocator = undefined,
     options: OctomarkOptions = .{},
@@ -100,12 +108,25 @@ pub const OctomarkParser = struct {
         para_starts: std.ArrayList(usize),
         para_ends: std.ArrayList(usize),
     };
-    const Delimiter = struct { pos: usize, content_end: usize, char: u8, count: usize, can_open: bool,
-    can_close: bool,
-    active: bool };
-    const Replacement = struct { pos: usize, end: usize, text: []const u8 };
+    const Delimiter = struct {
+        pos: usize,
+        content_end: usize,
+        char: u8,
+        count: usize,
+        can_open: bool,
+        can_close: bool,
+        active: bool,
+    };
+    const Replacement = struct {
+        pos: usize,
+        end: usize,
+        text: []const u8,
+    };
     const Stats = struct {
-        const C = struct { count: usize = 0, time_ns: u64 = 0 };
+        const C = struct {
+            count: usize = 0,
+            time_ns: u64 = 0,
+        };
         feed: C = .{},
         processSingleLine: C = .{},
         parseInlineContent: C = .{},
@@ -139,10 +160,15 @@ pub const OctomarkParser = struct {
     inline fn startCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats)) u64 {
         if (builtin.mode == .Debug) {
             @field(self.stats, @tagName(field)).count += 1;
-            return self.timer.read(); }
-        return 0; }
+            return self.timer.read();
+        }
+        return 0;
+    }
     inline fn endCall(self: *OctomarkParser, comptime field: std.meta.FieldEnum(Stats), s: u64) void {
-        if (builtin.mode == .Debug) @field(self.stats, @tagName(field)).time_ns += self.timer.read() - s; }
+        if (builtin.mode == .Debug) {
+            @field(self.stats, @tagName(field)).time_ns += self.timer.read() - s;
+        }
+    }
     pub fn init(self: *OctomarkParser, allocator: std.mem.Allocator) !void {
         self.* = .{
             .allocator = allocator,
@@ -155,7 +181,8 @@ pub const OctomarkParser = struct {
         };
         if (builtin.mode == .Debug) self.timer = try std.time.Timer.start();
         self.pending_buffer = .{};
-        try self.pending_buffer.ensureTotalCapacity(allocator, 4096); }
+        try self.pending_buffer.ensureTotalCapacity(allocator, 4096);
+    }
     pub fn deinit(self: *OctomarkParser, allocator: std.mem.Allocator) void {
         self.pending_buffer.deinit(allocator);
         self.paragraph_content.deinit(allocator);
@@ -538,7 +565,185 @@ fn OutputProxy(comptime W: type) type {
         const s = p.startCall(.findSpec);
         defer p.endCall(.findSpec, s);
         return if (std.mem.indexOfAny(u8, text[start..], special_chars)) |off| start + off else text.len; }
-    fn decodeEntity(text: []const u8, out_buf: *[4]u8) struct { consumed: usize, len: usize } {
+    fn isSpaceOrNl(c: u8) bool {
+        return c == ' ' or c == '\t' or c == '\n' or c == '\r'; }
+    fn findLabelEnd(p: *OctomarkParser, text: []const u8, label_start: usize) ?usize {
+        var depth: usize = 1;
+        var k = label_start;
+        while (k < text.len) : (k += 1) {
+            if (text[k] == '\\' and k + 1 < text.len) {
+                k += 1;
+                continue; }
+            if (text[k] == '<') {
+                if (parseAutolink(text, k)) |a| {
+                    k = a.end - 1;
+                    continue; }
+                const l = p.parseHtmlTag(text[k..]);
+                if (l > 0) {
+                    k += l - 1;
+                    continue; }
+            }
+            if (text[k] == '`') {
+                var run_len: usize = 1;
+                while (k + run_len < text.len and text[k + run_len] == '`') run_len += 1;
+                if (OctomarkParser.findClosingBackticks(text, k + run_len, run_len)) |m_pos| {
+                    k = m_pos + run_len - 1;
+                    continue; }
+                return null;
+            }
+            if (text[k] == ']') {
+                depth -= 1;
+                if (depth == 0) return k;
+            } else if (text[k] == '[') {
+                depth += 1; }
+        }
+        return null; }
+    const LinkDest = struct { dest_start: usize, dest_end: usize, title_start: ?usize, title_end: ?usize, end: usize };
+    fn parseLinkDestination(text: []const u8, start: usize) ?LinkDest {
+        var i = start;
+        while (i < text.len and isSpaceOrNl(text[i])) : (i += 1) {}
+        if (i >= text.len) return null;
+        const raw_start = i;
+        var dest_start: usize = i;
+        var dest_end: usize = i;
+        var angle = false;
+        if (text[i] == '<') {
+            var j = i + 1;
+            var ok = true;
+            while (j < text.len) : (j += 1) {
+                const ch = text[j];
+                if (ch == '\\' and j + 1 < text.len and isAsciiPunct(text[j + 1])) {
+                    j += 1;
+                    continue; }
+                if (ch == '>') {
+                    dest_start = i + 1;
+                    dest_end = j;
+                    j += 1;
+                    if (j < text.len and !isSpaceOrNl(text[j]) and text[j] != ')') ok = false else angle = true;
+                    i = j;
+                    break; }
+                if (ch == '\n' or ch == '\r') {
+                    ok = false;
+                    break; }
+            }
+            if (!ok) angle = false;
+        }
+        if (!angle) {
+            if (text[raw_start] == '<') return null;
+            i = raw_start;
+            dest_start = raw_start;
+            var depth: usize = 0;
+            while (i < text.len) {
+                const ch = text[i];
+                if (ch == '\\' and i + 1 < text.len and isAsciiPunct(text[i + 1])) {
+                    i += 2;
+                    continue; }
+                if (ch == '(') {
+                    depth += 1;
+                    i += 1;
+                    continue; }
+                if (ch == ')') {
+                    if (depth == 0) break;
+                    depth -= 1;
+                    i += 1;
+                    continue; }
+                if (isSpaceOrNl(ch)) break;
+                i += 1;
+            }
+            dest_end = i;
+        }
+        var j = i;
+        while (j < text.len and isSpaceOrNl(text[j])) : (j += 1) {}
+        if (j < text.len and text[j] == ')') {
+            return .{ .dest_start = dest_start, .dest_end = dest_end, .title_start = null, .title_end = null,
+            .end = j + 1 }; }
+        if (j >= text.len) return null;
+        const open = text[j];
+        if (open != '"' and open != '\'' and open != '(') return null;
+        const close: u8 = if (open == '(') ')' else open;
+        j += 1;
+        const title_start = j;
+        var title_end: ?usize = null;
+        while (j < text.len) : (j += 1) {
+            const ch = text[j];
+            if (ch == '\\' and j + 1 < text.len and isAsciiPunct(text[j + 1])) {
+                j += 1;
+                continue; }
+            if (ch == close) {
+                title_end = j;
+                j += 1;
+                break; }
+        }
+        if (title_end == null) return null;
+        while (j < text.len and isSpaceOrNl(text[j])) : (j += 1) {}
+        if (j < text.len and text[j] == ')') {
+            return .{ .dest_start = dest_start, .dest_end = dest_end, .title_start = title_start,
+            .title_end = title_end, .end = j + 1 };
+        }
+        return null; }
+    const LinkMatch = struct { label_start: usize, label_end: usize, dest: LinkDest, is_image: bool };
+    fn parseInlineLink(p: *OctomarkParser, text: []const u8, start: usize, is_image: bool) ?LinkMatch {
+        if (is_image) {
+            if (start + 1 >= text.len or text[start + 1] != '[') return null;
+        } else if (text[start] != '[') return null;
+        const label_start = if (is_image) start + 2 else start + 1;
+        const label_end = findLabelEnd(p, text, label_start) orelse return null;
+        if (label_end + 1 >= text.len or text[label_end + 1] != '(') return null;
+        const dest = parseLinkDestination(text, label_end + 2) orelse return null;
+        return .{ .label_start = label_start, .label_end = label_end, .dest = dest, .is_image = is_image }; }
+    const Autolink = struct { end: usize, is_email: bool, content_start: usize, content_end: usize };
+    fn parseAutolink(text: []const u8, start: usize) ?Autolink {
+        if (start + 1 >= text.len or text[start] != '<') return null;
+        if (std.mem.indexOfScalar(u8, text[start + 1 ..], '>')) |off| {
+            const lc = text[start + 1 .. start + 1 + off];
+            if (std.mem.indexOfAny(u8, lc, " \t\n") != null) return null;
+            var al = false;
+            var em_l = false;
+            if (std.mem.indexOfScalar(u8, lc, ':')) |sc_i| {
+                const sch = lc[0..sc_i];
+                if (sch.len >= 2 and sch.len <= 32 and std.ascii.isAlphabetic(sch[0])) {
+                    al = true;
+                    for (sch[1..]) |sc| if (!std.ascii.isAlphanumeric(sc) and sc != '+' and sc != '.' and sc != '-')
+                    {
+                        al = false;
+                        break;
+                    }; }
+            } else if (std.mem.indexOfScalar(u8, lc, '@')) |a| {
+                if (a > 0 and a < lc.len - 1 and std.mem.indexOfScalar(u8, lc[a + 1 ..], '.') != null) {
+                    al = true;
+                    em_l = true; }
+            }
+            if (al and std.mem.indexOfAny(u8, lc, if (em_l) " \t\n\\" else " \t\n") != null) al = false;
+            if (al) return .{ .end = start + off + 2, .is_email = em_l, .content_start = start + 1,
+            .content_end = start + 1 + off };
+        }
+        return null; }
+    fn labelHasLinkLike(p: *OctomarkParser, text: []const u8) bool {
+        var i: usize = 0;
+        while (i < text.len) {
+            const c = text[i];
+            if (c == '\\' and i + 1 < text.len) {
+                i += 2;
+                continue; }
+            if (c == '`') {
+                var run_len: usize = 1;
+                while (i + run_len < text.len and text[i + run_len] == '`') run_len += 1;
+                if (OctomarkParser.findClosingBackticks(text, i + run_len, run_len)) |m_pos| {
+                    i = m_pos + run_len;
+                    continue; }
+            }
+            if (c == '<') {
+                if (parseAutolink(text, i) != null) return true;
+            } else if (c == '!') {
+                if (parseInlineLink(p, text, i, true)) |m| {
+                    i = m.dest.end;
+                    continue; }
+            } else if (c == '[') {
+                if (parseInlineLink(p, text, i, false) != null) return true;
+            }
+            i += 1; }
+        return false; }
+    fn decodeEntity(text: []const u8, out_buf: *[8]u8) struct { consumed: usize, len: usize } {
         if (text.len < 2 or text[0] != '&') return .{ .consumed = 0, .len = 0 };
         var j: usize = 1;
         var decoded_len: usize = 0;
@@ -552,10 +757,14 @@ fn OutputProxy(comptime W: type) type {
             while (j < text.len and (if (b == 10) std.ascii.isDigit(text[j]) else std.ascii.isHex(text[j]))) : (j += 1)
             {}
             if (j > cp_s and j < text.len and text[j] == ';') {
-                var cp = std.fmt.parseInt(u21, text[cp_s..j], b) catch 0;
+                var cp = std.fmt.parseInt(u32, text[cp_s..j], b) catch 0;
                 if (cp == 0) cp = 0xFFFD;
-                if (cp > 0) decoded_len = std.unicode.utf8Encode(@intCast(cp), out_buf) catch 0;
-                if (decoded_len > 0) j += 1 else j = 1; // Success implies consume ;
+                if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) {
+                    j = 1;
+                } else {
+                    decoded_len = std.unicode.utf8Encode(@intCast(cp), out_buf[0..4]) catch 0;
+                    if (decoded_len > 0) j += 1 else j = 1; // Success implies consume ;
+                }
             } else j = 1;
         } else {
             while (j < text.len and std.ascii.isAlphanumeric(text[j])) : (j += 1) {}
@@ -563,16 +772,21 @@ fn OutputProxy(comptime W: type) type {
                 const en = text[1..j];
                 const d: ?[]const u8 = switch (en.len) {
                     2 => if (std.mem.eql(u8, en, "lt")) "<" else if (std.mem.eql(u8, en, "gt")) ">" else null,
-                    3 => if (std.mem.eql(u8, en, "amp")) "&" else null,
+                    3 => if (std.mem.eql(u8, en, "amp")) "&" else if (std.mem.eql(u8, en, "ngE")) "≧̸" else null,
                     4 => if (std.mem.eql(u8, en, "quot")) "\"" else if (std.mem.eql(u8, en, "apos")) "'" else if
                         (std.mem.eql(u8, en, "copy")) "©" else if (std.mem.eql(u8, en, "nbsp")) "\u{00A0}" else if
-                        (std.mem.eql(u8, en, "ouml")) "\u{00F6}" else null,
+                        (std.mem.eql(u8, en, "ouml")) "\u{00F6}" else if (std.mem.eql(u8, en, "auml")) "\u{00E4}" else null,
                     5 => if (std.mem.eql(u8, en, "ndash")) "–" else if (std.mem.eql(u8, en, "mdash")) "—" else if
                         (std.mem.eql(u8, en, "AElig")) "\u{00C6}" else null,
+                    6 => if (std.mem.eql(u8, en, "Dcaron")) "\u{010E}" else if (std.mem.eql(u8, en, "frac34"))
+                        "\u{00BE}" else null,
+                    12 => if (std.mem.eql(u8, en, "HilbertSpace")) "\u{210B}" else null,
+                    13 => if (std.mem.eql(u8, en, "DifferentialD")) "\u{2146}" else null,
+                    24 => if (std.mem.eql(u8, en, "ClockwiseContourIntegral")) "\u{2232}" else null,
                     else => null,
                 };
                 if (d) |v| {
-                    if (v.len <= 4) {
+                    if (v.len <= out_buf.len) {
                         @memcpy(out_buf[0..v.len], v);
                         decoded_len = v.len;
                         j += 1;
@@ -584,7 +798,7 @@ fn OutputProxy(comptime W: type) type {
     fn needsPercentEncode(c: u8) bool {
         if (std.ascii.isAlphanumeric(c)) return false;
         return switch (c) {
-            '-', '.', '_', '~', '!', '$', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?' => false,
+            '-', '.', '_', '~', '!', '$', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@', '/', '?', '#' => false,
             else => true,
         }; }
     pub fn parseInlineContent(p: *OctomarkParser, text: []const u8, o: anytype) !void {
@@ -595,6 +809,25 @@ fn OutputProxy(comptime W: type) type {
                 return a.pos < b.pos; }
         }.less);
         try p.parseInlineContentDepth(text, o, 0, 0, false); }
+    fn parseInlineContentScoped(p: *OctomarkParser, text: []const u8, o: anytype, depth: usize, plain: bool)
+    anyerror!void {
+        if (depth > MAX_INLINE_NESTING) {
+            try writeAll(o, text);
+            return; }
+        const saved_reps = p.replacements;
+        const saved_delim_len = p.delimiter_stack_len;
+        var local_reps: std.ArrayList(Replacement) = .{};
+        defer local_reps.deinit(p.allocator);
+        p.replacements = local_reps;
+        p.delimiter_stack_len = 0;
+        try p.scanInline(text, 0);
+        std.sort.block(Replacement, p.replacements.items, {}, struct {
+            fn less(_: void, a: Replacement, b: Replacement) bool {
+                return a.pos < b.pos; }
+        }.less);
+        try p.renderInline(text, p.replacements.items, o, depth, 0, plain);
+        p.replacements = saved_reps;
+        p.delimiter_stack_len = saved_delim_len; }
     fn parseInlineContentDepth(p: *OctomarkParser, text: []const u8, o: anytype, depth: usize, g_off: usize, plain:
     bool) anyerror!void {
         const _s = p.startCall(.parseInlineContent);
@@ -685,7 +918,7 @@ fn OutputProxy(comptime W: type) type {
         defer p.endCall(.scanInline, s);
         var i: usize = 0;
         while (i < text.len) {
-            const off = std.mem.indexOfAny(u8, text[i..], "*_`~<\\") orelse break;
+            const off = std.mem.indexOfAny(u8, text[i..], "*_`~<\\[!") orelse break;
             i += off;
             switch (text[i]) {
                 '*', '_', '~' => i = try p.scanDelims(text, i, text[i], bottom),
@@ -698,8 +931,24 @@ fn OutputProxy(comptime W: type) type {
                         i += cnt; }
                 },
                 '<' => {
-                    const l = p.parseHtmlTag(text[i..]);
-                    i += if (l > 0) l else 1;
+                    if (parseAutolink(text, i)) |a| {
+                        i = a.end;
+                    } else {
+                        const l = p.parseHtmlTag(text[i..]);
+                        i += if (l > 0) l else 1;
+                    }
+                },
+                '[', '!' => {
+                    if (parseInlineLink(p, text, i, text[i] == '!')) |m| {
+                        const label = text[m.label_start..m.label_end];
+                        if (!m.is_image and labelHasLinkLike(p, label)) {
+                            i += 1;
+                        } else {
+                            i = m.dest.end;
+                        }
+                    } else {
+                        i += 1;
+                    }
                 },
                 '\\' => i += if (i + 1 < text.len and isAsciiPunct(text[i + 1])) 2 else 1,
                 else => i += 1, }
@@ -794,185 +1043,108 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                 '[', '!' => {
                     const img = (c == '!');
                     if (!img or (i + 1 < text.len and text[i + 1] == '[')) {
-                        const b_s = if (img) i + 2 else i + 1;
-                        var b_e_o: ?usize = null;
-                        var b_d: usize = 1;
-                        var k = b_s;
-                        while (k < text.len) : (k += 1) {
-                            if (text[k] == '\\' and k + 1 < text.len) {
-                                k += 1;
-                                continue; }
-                            if (text[k] == '`') {
-                                var run_len: usize = 1;
-                                while (k + run_len < text.len and text[k + run_len] == '`') run_len += 1;
-                                if (OctomarkParser.findClosingBackticks(text, k + run_len, run_len)) |m_pos| {
-                                    k = m_pos + run_len - 1;
-                                    continue; }
-                            }
-                            if (text[k] == ']') {
-                                b_d -= 1;
-                                if (b_d == 0) {
-                                    b_e_o = k;
-                                    break; }
-                            } else if (text[k] == '[') b_d += 1; }
-                        if (b_e_o) |b_e| {
-                            if (b_e + 1 < text.len and text[b_e + 1] == '(') {
-                                const p_s = b_e + 2;
-                                var p_e_o: ?usize = null;
-                                var p_d: usize = 1;
-                                var m = p_s;
-                                while (m < text.len) : (m += 1) {
-                                    const ch = text[m];
-                                    if (ch == '\\' and m + 1 < text.len and isAsciiPunct(text[m + 1])) {
-                                        m += 1;
-                                        continue; }
-                                    if (ch == '(') p_d += 1 else if (ch == ')') {
-                                        p_d -= 1;
-                                        if (p_d == 0) {
-                                            p_e_o = m;
-                                            break; }
-                                    }
-                                }
-                                if (p_e_o) |p_e| {
-                                    var url = std.mem.trim(u8, text[b_e + 2 .. p_e], " \t\n");
-                                    var tit: ?[]const u8 = null;
-                                    if (url.len >= 2 and url[0] == '<' and url[url.len - 1] == '>') {
-                                        url = url[1 .. url.len - 1];
-                                    } else {
-                                        if (std.mem.indexOfAny(u8, url, " \t\n")) |t_s| {
-                                            const p_t = std.mem.trim(u8, url[t_s..], " \t\n");
-                                            if (p_t.len >= 2 and ((p_t[0] == '"' and p_t[p_t.len - 1] == '"') or
-                                                (p_t[0] == '\'' and p_t[p_t.len - 1] == '\'') or
-                                                (p_t[0] == '(' and p_t[p_t.len - 1] == ')'))) {
-                                                url = url[0..t_s];
-                                                tit = p_t[1 .. p_t.len - 1]; }
+                        if (parseInlineLink(p, text, i, img)) |m| {
+                            const label = text[m.label_start..m.label_end];
+                            if (img or !labelHasLinkLike(p, label)) {
+                                if (plain) {
+                                    try p.parseInlineContentScoped(label, o, depth + 1, true);
+                                } else {
+                                    const url = text[m.dest.dest_start..m.dest.dest_end];
+                                    const tit = if (m.dest.title_start) |ts| text[ts..m.dest.title_end.?] else null;
+                                    try writeAll(o, if (img) "<img src=\"" else "<a href=\"");
+                                    var u: usize = 0;
+                                    while (u < url.len) {
+                                        if (url[u] == '&') {
+                                            var db: [8]u8 = undefined;
+                                            const dr = decodeEntity(url[u..], &db);
+                                            if (dr.len > 0) {
+                                                for (db[0..dr.len]) |b| {
+                                                    if (needsPercentEncode(b)) {
+                                                        try writeByte(o, '%');
+                                                        try writeHex(o, b);
+                                                    } else if (html_escape_map[b]) |e| {
+                                                        try writeAll(o, e);
+                                                    } else try writeByte(o, b); }
+                                                u += dr.consumed;
+                                                continue; }
                                         }
-                                    }
-                                    if (plain) {
-                                        try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s, true);
-                                    } else {
-                                        try writeAll(o, if (img) "<img src=\"" else "<a href=\"");
-                                        var u: usize = 0;
-                                        while (u < url.len) {
-                                            if (url[u] == '&') {
-                                                var db: [4]u8 = undefined;
-                                                const dr = decodeEntity(url[u..], &db);
+                                        var ch = url[u];
+                                        if (ch == '\\' and u + 1 < url.len and isAsciiPunct(url[u + 1])) {
+                                            u += 1;
+                                            ch = url[u]; }
+                                        if (needsPercentEncode(ch)) {
+                                            if (ch == '%') {
+                                                if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and
+                                                std.ascii.isHex(url[u + 2])) {
+                                                    try writeByte(o, ch);
+                                                } else try writeAll(o, "%25");
+                                            } else {
+                                                try writeByte(o, '%');
+                                                try writeHex(o, ch); }
+                                        } else if (html_escape_map[ch]) |e| {
+                                            try writeAll(o, e);
+                                        } else try writeByte(o, ch);
+                                        u += 1; }
+                                    try writeByte(o, '"');
+                                    if (tit) |t| {
+                                        try writeAll(o, " title=\"");
+                                        var ti: usize = 0;
+                                        while (ti < t.len) {
+                                            if (t[ti] == '&') {
+                                                var db: [8]u8 = undefined;
+                                                const dr = decodeEntity(t[ti..], &db);
                                                 if (dr.len > 0) {
-                                                    for (db[0..dr.len]) |b| {
-                                                        if (needsPercentEncode(b)) {
-                                                            try writeByte(o, '%');
-                                                            try writeHex(o, b);
-                                                        } else if (html_escape_map[b]) |e| {
-                                                            try writeAll(o, e);
-                                                        } else try writeByte(o, b); }
-                                                    u += dr.consumed;
+                                                    try p.esc(db[0..dr.len], o);
+                                                    ti += dr.consumed;
                                                     continue; }
                                             }
-                                            var ch = url[u];
-                                            if (ch == '\\' and u + 1 < url.len and isAsciiPunct(url[u + 1])) {
-                                                u += 1;
-                                                ch = url[u]; }
-                                            if (needsPercentEncode(ch)) {
-                                                if (ch == '%') {
-                                                    // If % is followed by 2 hex digits, preserve it
-                                                    if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and
-                                                    std.ascii.isHex(url[u + 2])) {
-                                                        try writeByte(o, ch);
-                                                    } else try writeAll(o, "%25");
-                                                } else {
-                                                    try writeByte(o, '%');
-                                                    try writeHex(o, ch); }
-                                            } else if (html_escape_map[ch]) |e| {
-                                                try writeAll(o, e);
-                                            } else try writeByte(o, ch);
-                                            u += 1; }
-                                        try writeByte(o, '"');
-                                        if (tit) |t| {
-                                            try writeAll(o, " title=\"");
-                                            var ti: usize = 0;
-                                            while (ti < t.len) {
-                                                if (t[ti] == '&') {
-                                                    var db: [4]u8 = undefined;
-                                                    const dr = decodeEntity(t[ti..], &db);
-                                                    if (dr.len > 0) {
-                                                        try p.esc(db[0..dr.len], o);
-                                                        ti += dr.consumed;
-                                                        continue; }
-                                                }
-                                                if (t[ti] == '\\' and ti + 1 < t.len and isAsciiPunct(t[ti + 1])) {
-                                                    ti += 1; }
-                                                if (html_escape_map[t[ti]]) |e| try writeAll(o, e) else try
-                                                writeByte(o, t[ti]);
+                                            if (t[ti] == '\\' and ti + 1 < t.len and isAsciiPunct(t[ti + 1])) {
                                                 ti += 1; }
-                                            try writeByte(o, '"'); }
-                                        if (img) {
-                                            try writeAll(o, " alt=\"");
-                                            try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s,
-                                            true);
-                                            try writeAll(o, "\">");
-                                        } else {
-                                            try writeAll(o, ">");
-                                            try p.parseInlineContentDepth(text[b_s..b_e], o, depth + 1, g_off + b_s,
-                                            false);
-                                            try writeAll(o, "</a>"); }
-                                    }
-                                    i = p_e + 1;
-                                    h = true; }
-                            }
+                                            if (html_escape_map[t[ti]]) |e| try writeAll(o, e) else try
+                                            writeByte(o, t[ti]);
+                                            ti += 1; }
+                                        try writeByte(o, '"'); }
+                                    if (img) {
+                                        try writeAll(o, " alt=\"");
+                                        try p.parseInlineContentScoped(label, o, depth + 1, true);
+                                        try writeAll(o, "\">");
+                                    } else {
+                                        try writeAll(o, ">");
+                                        try p.parseInlineContentScoped(label, o, depth + 1, false);
+                                        try writeAll(o, "</a>"); }
+                                }
+                                i = m.dest.end;
+                                h = true; }
                         }
                     }
                 },
                 '<' => {
-                    if (i + 1 < text.len) {
-                        if (std.mem.indexOfScalar(u8, text[i + 1 ..], '>')) |off| {
-                            const lc = text[i + 1 .. i + 1 + off];
-                            if (std.mem.indexOfAny(u8, lc, " \t\n") == null) {
-                                var al = false;
-                                var em_l = false;
-                                if (std.mem.indexOfScalar(u8, lc, ':')) |sc_i| {
-                                    const sch = lc[0..sc_i];
-                                    if (sch.len >= 2 and sch.len <= 32 and std.ascii.isAlphabetic(sch[0])) {
-                                        al = true;
-                                        for (sch[1..]) |sc| if (!std.ascii.isAlphanumeric(sc) and sc != '+' and
-                                            sc != '.' and sc != '-') {
-                                            al = false;
-                                            break;
-                                        }; }
-                                } else if (std.mem.indexOfScalar(u8, lc, '@')) |a| {
-                                    if (a > 0 and a < lc.len - 1 and
-                                        std.mem.indexOfScalar(u8, lc[a + 1 ..], '.') != null) {
-                                        al = true;
-                                        em_l = true; }
-                                }
-                                if (al and std.mem.indexOfAny(u8, lc, if (em_l) " \t\n\\" else " \t\n") != null)
-                                    al = false;
-                                if (al) {
-                                    if (!plain) {
-                                        try writeAll(o, "<a href=\"");
-                                        if (em_l) try writeAll(o, "mailto:");
-                                        for (lc) |ch| {
-                                            if (ch == '\\') {
-                                                try writeAll(o, "%5C");
-                                            } else if (ch == '&') {
-                                                try writeAll(o, "&amp;");
-                                            } else if (needsPercentEncode(ch)) {
-                                                if (ch == '%') {
-                                                    try writeAll(o, "%25");
-                                                } else {
-                                                    try writeByte(o, '%');
-                                                    try writeHex(o, ch); }
-                                            } else if (html_escape_map[ch]) |e| {
-                                                try writeAll(o, e);
-                                            } else {
-                                                try writeByte(o, ch); }
-                                        }
-                                        try writeAll(o, "\">"); }
-                                    try p.esc(lc, o);
-                                    if (!plain) try writeAll(o, "</a>");
-                                    i += off + 2;
-                                    h = true; }
+                    if (parseAutolink(text, i)) |a| {
+                        const lc = text[a.content_start..a.content_end];
+                        if (!plain) {
+                            try writeAll(o, "<a href=\"");
+                            if (a.is_email) try writeAll(o, "mailto:");
+                            for (lc) |ch| {
+                                if (ch == '\\') {
+                                    try writeAll(o, "%5C");
+                                } else if (ch == '&') {
+                                    try writeAll(o, "&amp;");
+                                } else if (needsPercentEncode(ch)) {
+                                    if (ch == '%') {
+                                        try writeAll(o, "%25");
+                                    } else {
+                                        try writeByte(o, '%');
+                                        try writeHex(o, ch); }
+                                } else if (html_escape_map[ch]) |e| {
+                                    try writeAll(o, e);
+                                } else {
+                                    try writeByte(o, ch); }
                             }
-                        }
+                            try writeAll(o, "\">"); }
+                        try p.esc(lc, o);
+                        if (!plain) try writeAll(o, "</a>");
+                        i = a.end;
+                        h = true;
                     }
                     if (!h and p.options.enable_html) {
                         const l = p.parseHtmlTag(text[i..]);
@@ -1001,7 +1173,7 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                         h = true; }
                 },
                 '&' => {
-                    var db: [4]u8 = undefined;
+                    var db: [8]u8 = undefined;
                     const dr = decodeEntity(text[i..], &db);
                     if (dr.len > 0) {
                         try p.esc(db[0..dr.len], o);
@@ -1241,7 +1413,7 @@ fn renderInline(p: *OctomarkParser, text: []const u8, reps: []const Replacement,
                 var k = info_start;
                 while (k < info_end) {
                     if (content[k] == '&') {
-                        var db: [4]u8 = undefined;
+                        var db: [8]u8 = undefined;
                         const dr = decodeEntity(content[k..], &db);
                         if (dr.len > 0) {
                             try parser.esc(db[0..dr.len], output);
