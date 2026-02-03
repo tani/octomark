@@ -91,10 +91,12 @@ pub fn main() !void {
 
 ## Testing
 
-A correctness test suite is provided in `src/test.zig`.
-
 ```bash
-zig build test
+# Build the project first
+zig build -Doptimize=ReleaseSafe
+
+# Run the spec tests
+uv run python3 commonmark-spec/test/spec_tests.py --program "./zig-out/bin/octomark" --spec commonmark-spec/spec.txt
 ```
 
 ## License

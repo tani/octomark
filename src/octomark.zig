@@ -154,24 +154,29 @@ pub const OctomarkParser = struct {
     pending_task_marker: u8 = 0,
     pending_loose_idx: ?usize = null,
     prev_line_blank: bool = false,
-    active_list_idx: i32 = -1,
+    active_list_stack_idx: i32 = -1,
+    blockquote_depth: u8 = 0,
     list_buffers: std.ArrayListUnmanaged(ListBuffer) = .{},
     timer: if (builtin.mode == .Debug) std.time.Timer else struct {} = undefined,
-    const ItemMetadata = struct {
+    const ListMetaTag = enum(u8) {
+        item,
+        paragraph,
+    };
+    const ListMeta = struct {
+        tag: ListMetaTag,
         start: usize,
         end: usize = 0,
-        has_block: bool = false,
-        has_p: bool = false,
+        flags: u8 = 0,
     };
-    const ParaMetadata = struct {
-        item_idx: usize,
-        start: usize,
-        end: usize,
+    const ListMetaFlags = struct {
+        const has_block: u8 = 1 << 0;
+        const has_p: u8 = 1 << 1;
     };
     const ListBuffer = struct {
         bytes: std.ArrayListUnmanaged(u8),
-        items: std.ArrayListUnmanaged(ItemMetadata),
-        paras: std.ArrayListUnmanaged(ParaMetadata),
+        meta: std.ArrayListUnmanaged(ListMeta),
+        last_item_idx: ?usize = null,
+        para_count: usize = 0,
     };
     const Delimiter = struct {
         pos: usize,
@@ -258,7 +263,8 @@ pub const OctomarkParser = struct {
             .replacements = .{},
             .pending_task_marker = 0,
             .pending_loose_idx = null,
-            .active_list_idx = -1,
+            .active_list_stack_idx = -1,
+            .blockquote_depth = 0,
             .list_buffers = .{},
         };
         if (builtin.mode == .Debug) self.timer = try std.time.Timer.start();
@@ -272,8 +278,7 @@ pub const OctomarkParser = struct {
         self.replacements.deinit(allocator);
         for (self.list_buffers.items) |*lb| {
             lb.bytes.deinit(allocator);
-            lb.items.deinit(allocator);
-            lb.paras.deinit(allocator);
+            lb.meta.deinit(allocator);
         }
         self.list_buffers.deinit(allocator);
     }
@@ -314,40 +319,26 @@ pub const OctomarkParser = struct {
             }
         }
     }
-    inline fn writeAll(writer: anytype, bytes: []const u8) !void {
+    inline fn writeAll(p: *OctomarkParser, writer: anytype, bytes: []const u8) !void {
+        if (p.currentListBuffer()) |lb| {
+            try lb.bytes.appendSlice(p.allocator, bytes);
+            return;
+        }
         const W = if (@typeInfo(@TypeOf(writer)) == .pointer) std.meta.Child(@TypeOf(writer)) else @TypeOf(writer);
         if (comptime @hasField(W, "interface")) try writer.interface.writeAll(bytes) else try writer.writeAll(bytes);
     }
-    inline fn writeByte(writer: anytype, byte: u8) !void {
+    inline fn writeByte(p: *OctomarkParser, writer: anytype, byte: u8) !void {
+        if (p.currentListBuffer()) |lb| {
+            try lb.bytes.append(p.allocator, byte);
+            return;
+        }
         const W = if (@typeInfo(@TypeOf(writer)) == .pointer) std.meta.Child(@TypeOf(writer)) else @TypeOf(writer);
         if (comptime @hasField(W, "interface")) try writer.interface.writeByte(byte) else try writer.writeByte(byte);
     }
-    inline fn writeHex(writer: anytype, byte: u8) !void {
+    inline fn writeHex(p: *OctomarkParser, writer: anytype, byte: u8) !void {
         const hex = "0123456789ABCDEF";
-        try writeByte(writer, hex[byte >> 4]);
-        try writeByte(writer, hex[byte & 0xF]);
-    }
-    fn OutputProxy(comptime W: type) type {
-        return struct {
-            parser: *OctomarkParser,
-            writer: W,
-            pub fn writeAll(self: @This(), bytes: []const u8) !void {
-                if (self.parser.currentListBuffer()) |lb| {
-                    try lb.bytes.appendSlice(self.parser.allocator, bytes);
-                } else {
-                    const Writer = if (@typeInfo(W) == .pointer) std.meta.Child(W) else W;
-                    if (comptime @hasField(Writer, "interface")) try self.writer.interface.writeAll(bytes) else try self.writer.writeAll(bytes);
-                }
-            }
-            pub fn writeByte(self: @This(), byte: u8) !void {
-                if (self.parser.currentListBuffer()) |lb| {
-                    try lb.bytes.append(self.parser.allocator, byte);
-                } else {
-                    const Writer = if (@typeInfo(W) == .pointer) std.meta.Child(W) else W;
-                    if (comptime @hasField(Writer, "interface")) try self.writer.interface.writeByte(byte) else try self.writer.writeByte(byte);
-                }
-            }
-        };
+        try p.writeByte(writer, hex[byte >> 4]);
+        try p.writeByte(writer, hex[byte & 0xF]);
     }
     /// Feed a chunk into the parser. Returns error.OutOfMemory or writer errors.
     pub fn feed(self: *OctomarkParser, chunk: []const u8, output: anytype, allocator: std.mem.Allocator) !void {
@@ -356,14 +347,12 @@ pub const OctomarkParser = struct {
         try self.pending_buffer.appendSlice(allocator, chunk);
         const data = self.pending_buffer.items;
         const size = self.pending_buffer.items.len;
-        const Proxy = OutputProxy(@TypeOf(output));
-        const proxy = Proxy{ .parser = self, .writer = output };
         var pos: usize = 0;
         while (pos < size) {
             const next = std.mem.indexOfScalar(u8, data[pos..], '\n');
             if (next == null) break;
             const line_len = next.?;
-            const skip = try self.processSingleLine(data[pos .. pos + line_len], data, pos + line_len + 1, proxy);
+            const skip = try self.processSingleLine(data[pos .. pos + line_len], data, pos + line_len + 1, output);
             pos += line_len + 1;
             if (skip) {
                 const nn = std.mem.indexOfScalar(u8, data[pos..], '\n');
@@ -384,17 +373,15 @@ pub const OctomarkParser = struct {
     pub fn finish(self: *OctomarkParser, output: anytype) !void {
         const _s = self.startCall(.finish);
         defer self.endCall(.finish, _s);
-        const Proxy = OutputProxy(@TypeOf(output));
-        const proxy = Proxy{ .parser = self, .writer = output };
         if (self.pending_buffer.items.len > 0) {
             _ = try self.processSingleLine(
                 self.pending_buffer.items[0..self.pending_buffer.items.len],
                 self.pending_buffer.items,
                 self.pending_buffer.items.len,
-                proxy,
+                output,
             );
         }
-        while (self.stack_depth > 0) try self.renderTop(proxy);
+        while (self.stack_depth > 0) try self.renderTop(output);
     }
     fn pushBlock(p: *OctomarkParser, t: BlockType, i: i32) !void {
         const _s = p.startCall(.pushBlock);
@@ -406,18 +393,20 @@ pub const OctomarkParser = struct {
         defer p.endCall(.pushBlockExtra, _s);
         if (p.stack_depth >= MAX_BLOCK_NESTING) return error.NestingTooDeep;
         p.block_stack[p.stack_depth] = .{ .block_type = t, .indent_level = i, .content_indent = i, .loose = false, .extra_type = extra };
+        if (t == .blockquote) p.blockquote_depth += 1;
         if (t == .unordered_list or t == .ordered_list) {
             p.listItemMarkBlock();
             const idx = self_list_buf_idx: {
                 try p.list_buffers.append(p.allocator, .{
                     .bytes = .{},
-                    .items = .{},
-                    .paras = .{},
+                    .meta = .{},
+                    .last_item_idx = null,
+                    .para_count = 0,
                 });
                 break :self_list_buf_idx p.list_buffers.items.len - 1;
             };
             p.block_stack[p.stack_depth].buffer_index = @intCast(idx);
-            p.active_list_idx = @intCast(idx);
+            p.active_list_stack_idx = @intCast(p.stack_depth);
         } else if (t != .paragraph) {
             p.listItemMarkBlock();
         }
@@ -427,16 +416,18 @@ pub const OctomarkParser = struct {
         const _s = p.startCall(.pop);
         defer p.endCall(.pop, _s);
         if (p.stack_depth > 0) {
-            const popped = p.block_stack[p.stack_depth - 1];
+            const popped_idx = p.stack_depth - 1;
+            const popped = p.block_stack[popped_idx];
             p.stack_depth -= 1;
-            if (popped.block_type == .unordered_list or popped.block_type == .ordered_list) {
-                p.active_list_idx = -1;
+            if (popped.block_type == .blockquote) p.blockquote_depth -= 1;
+            if (p.active_list_stack_idx == @as(i32, @intCast(popped_idx))) {
+                p.active_list_stack_idx = -1;
                 var i = p.stack_depth;
                 while (i > 0) {
                     i -= 1;
-                    const e = p.block_stack[i];
-                    if ((e.block_type == .unordered_list or e.block_type == .ordered_list) and e.buffer_index >= 0) {
-                        p.active_list_idx = e.buffer_index;
+                    const bt = p.block_stack[i].block_type;
+                    if (bt == .unordered_list or bt == .ordered_list) {
+                        p.active_list_stack_idx = @intCast(i);
                         break;
                     }
                 }
@@ -458,49 +449,38 @@ pub const OctomarkParser = struct {
         if (t == .indented_code) p.pending_code_blank_lines.clearRetainingCapacity();
         if (t == .unordered_list or t == .ordered_list) {
             const list_loose = p.block_stack[p.stack_depth - 1].loose;
-            if (p.paragraph_content.items.len > 0) {
-                if (list_loose) {
-                    p.listItemMarkParagraph();
-                    try writeAll(o, "<p>");
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    try writeAll(o, "</p>\n");
-                } else {
-                    const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
-                }
-                p.paragraph_content.clearRetainingCapacity();
-            }
+            try p.flushListParagraph(o, list_loose);
             p.listItemEnd();
             const close_tag = block_close_tags[@intFromEnum(t)];
             const lb_idx: usize = @intCast(p.block_stack[p.stack_depth - 1].buffer_index);
             var lb = &p.list_buffers.items[lb_idx];
-            if (lb.items.items.len > 0) {
-                var last_item = &lb.items.items[lb.items.items.len - 1];
-                if (last_item.end == 0) last_item.end = lb.bytes.items.len;
+            if (lb.last_item_idx) |idx| {
+                var last_item = &lb.meta.items[idx];
+                if (last_item.tag == .item and last_item.end == 0) last_item.end = lb.bytes.items.len;
             }
             p.pop();
-            if (list_loose and lb.paras.items.len > 0) {
+            if (list_loose and lb.para_count > 0) {
                 var cursor: usize = 0;
                 var i: usize = 0;
-                while (i < lb.paras.items.len) : (i += 1) {
-                    const p_meta = lb.paras.items[i];
+                while (i < lb.meta.items.len) : (i += 1) {
+                    const p_meta = lb.meta.items[i];
+                    if (p_meta.tag != .paragraph) continue;
                     if (p_meta.start < cursor or p_meta.end < p_meta.start or p_meta.end > lb.bytes.items.len) {
-                        try writeAll(o, lb.bytes.items[cursor..]);
+                        try p.writeAll(o, lb.bytes.items[cursor..]);
                         cursor = lb.bytes.items.len;
                         break;
                     }
-                    try writeAll(o, lb.bytes.items[cursor..p_meta.start]);
-                    try writeAll(o, "<p>");
-                    try writeAll(o, lb.bytes.items[p_meta.start..p_meta.end]);
-                    try writeAll(o, "</p>\n");
+                    try p.writeAll(o, lb.bytes.items[cursor..p_meta.start]);
+                    try p.writeAll(o, "<p>");
+                    try p.writeAll(o, lb.bytes.items[p_meta.start..p_meta.end]);
+                    try p.writeAll(o, "</p>\n");
                     cursor = p_meta.end;
                 }
-                if (cursor < lb.bytes.items.len) try writeAll(o, lb.bytes.items[cursor..]);
-                try writeAll(o, close_tag);
+                if (cursor < lb.bytes.items.len) try p.writeAll(o, lb.bytes.items[cursor..]);
+                try p.writeAll(o, close_tag);
             } else {
-                try writeAll(o, lb.bytes.items);
-                try writeAll(o, close_tag);
+                try p.writeAll(o, lb.bytes.items);
+                try p.writeAll(o, close_tag);
             }
             if (p.pending_loose_idx) |idx| {
                 if (p.stack_depth == 0 or idx >= p.stack_depth) p.pending_loose_idx = null;
@@ -510,7 +490,7 @@ pub const OctomarkParser = struct {
         if (p.paragraph_content.items.len > 0) {
             if (t == .paragraph) {
                 p.listItemMarkParagraph();
-                try writeAll(o, "<p>");
+                try p.writeAll(o, "<p>");
             }
             const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
             try p.parseInlineContent(p.paragraph_content.items, o);
@@ -523,7 +503,7 @@ pub const OctomarkParser = struct {
         if (p.pending_loose_idx) |idx| {
             if (p.stack_depth == 0 or idx >= p.stack_depth) p.pending_loose_idx = null;
         }
-        try writeAll(o, block_close_tags[@intFromEnum(t)]);
+        try p.writeAll(o, block_close_tags[@intFromEnum(t)]);
     }
     fn closeP(p: *OctomarkParser, o: anytype) !void {
         const _s = p.startCall(.closeP);
@@ -544,7 +524,11 @@ pub const OctomarkParser = struct {
     fn currentListBufferIndex(p: *OctomarkParser) ?usize {
         const _s = p.startCall(.currentListBufferIndex);
         defer p.endCall(.currentListBufferIndex, _s);
-        return if (p.active_list_idx >= 0) @intCast(p.active_list_idx) else null;
+        if (p.active_list_stack_idx >= 0) {
+            const idx = p.block_stack[@intCast(p.active_list_stack_idx)].buffer_index;
+            if (idx >= 0) return @intCast(idx);
+        }
+        return null;
     }
     fn currentListBuffer(p: *OctomarkParser) ?*ListBuffer {
         return if (p.currentListBufferIndex()) |idx| &p.list_buffers.items[idx] else null;
@@ -554,16 +538,20 @@ pub const OctomarkParser = struct {
         defer p.endCall(.listItemStart, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        lb.items.append(p.allocator, .{ .start = lb.bytes.items.len }) catch {};
+        lb.meta.append(p.allocator, .{
+            .tag = .item,
+            .start = lb.bytes.items.len,
+        }) catch {};
+        lb.last_item_idx = if (lb.meta.items.len > 0) lb.meta.items.len - 1 else null;
     }
     fn listItemEnd(p: *OctomarkParser) void {
         const _s = p.startCall(.listItemEnd);
         defer p.endCall(.listItemEnd, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.items.items.len > 0) {
-            var item = &lb.items.items[lb.items.items.len - 1];
-            if (item.end == 0) item.end = lb.bytes.items.len;
+        if (lb.last_item_idx) |item_idx| {
+            var item = &lb.meta.items[item_idx];
+            if (item.tag == .item and item.end == 0) item.end = lb.bytes.items.len;
         }
     }
     fn listItemMarkBlock(p: *OctomarkParser) void {
@@ -571,26 +559,68 @@ pub const OctomarkParser = struct {
         defer p.endCall(.listItemMarkBlock, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.items.items.len > 0) lb.items.items[lb.items.items.len - 1].has_block = true;
+        if (lb.last_item_idx) |item_idx| {
+            var item = &lb.meta.items[item_idx];
+            if (item.tag == .item) item.flags |= ListMetaFlags.has_block;
+        }
     }
     fn listItemMarkParagraph(p: *OctomarkParser) void {
         const _s = p.startCall(.listItemMarkParagraph);
         defer p.endCall(.listItemMarkParagraph, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.items.items.len > 0) lb.items.items[lb.items.items.len - 1].has_p = true;
+        if (lb.last_item_idx) |item_idx| {
+            var item = &lb.meta.items[item_idx];
+            if (item.tag == .item) item.flags |= ListMetaFlags.has_p;
+        }
     }
     fn listItemRecordParagraphSpan(p: *OctomarkParser, start: usize, end: usize) void {
         const _s = p.startCall(.listItemRecordParagraphSpan);
         defer p.endCall(.listItemRecordParagraphSpan, _s);
         const idx = p.currentListBufferIndex() orelse return;
         var lb = &p.list_buffers.items[idx];
-        if (lb.items.items.len == 0 or end <= start) return;
-        lb.paras.append(p.allocator, .{
-            .item_idx = lb.items.items.len - 1,
+        if (lb.last_item_idx == null or end <= start) return;
+        lb.meta.append(p.allocator, .{
+            .tag = .paragraph,
             .start = start,
             .end = end,
         }) catch {};
+        lb.para_count += 1;
+    }
+    inline fn flushListParagraph(p: *OctomarkParser, o: anytype, wrap_paragraph: bool) !void {
+        if (p.paragraph_content.items.len == 0) return;
+        if (wrap_paragraph) {
+            p.listItemMarkParagraph();
+            try p.writeAll(o, "<p>");
+            try p.parseInlineContent(p.paragraph_content.items, o);
+            try p.writeAll(o, "</p>\n");
+        } else {
+            const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
+            try p.parseInlineContent(p.paragraph_content.items, o);
+            if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
+        }
+        p.paragraph_content.clearRetainingCapacity();
+    }
+    inline fn handleBlankLine(p: *OctomarkParser, o: anytype, suppress_after_idx: ?usize, close_containers: bool) !bool {
+        const top_bt = p.topT();
+        if (top_bt == .paragraph or top_bt == .table or top_bt == .code or top_bt == .math) try p.renderTop(o);
+        const l_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
+        if (l_idx != null and p.paragraph_content.items.len > 0) {
+            const list_loose = p.block_stack[l_idx.?].loose;
+            try p.flushListParagraph(o, list_loose);
+        }
+        if (l_idx) |idx| {
+            const suppress = if (suppress_after_idx) |bq_idx| bq_idx > idx else false;
+            if (!suppress) p.pending_loose_idx = idx;
+        }
+        if (close_containers) {
+            while (p.stack_depth > 0 and p.topT() != null and @intFromEnum(p.topT().?) >=
+                @intFromEnum(BlockType.blockquote))
+            {
+                try p.renderTop(o);
+            }
+        }
+        return false;
     }
     fn applyPendingLoose(p: *OctomarkParser, o: anytype) !void {
         const _s = p.startCall(.applyPendingLoose);
@@ -610,11 +640,11 @@ pub const OctomarkParser = struct {
         while (i < text.len) {
             if (std.mem.indexOfAny(u8, text[i..], "&<>\"'")) |off| {
                 const j = i + off;
-                if (j > i) try writeAll(o, text[i..j]);
-                try writeAll(o, html_escape_map[text[j]].?);
+                if (j > i) try p.writeAll(o, text[i..j]);
+                try p.writeAll(o, html_escape_map[text[j]].?);
                 i = j + 1;
             } else {
-                try writeAll(o, text[i..]);
+                try p.writeAll(o, text[i..]);
                 break;
             }
         }
@@ -681,7 +711,7 @@ pub const OctomarkParser = struct {
         return c == 0x85 or c == 0xA0 or c == 0x1680 or (c >= 0x2000 and c <= 0x200A) or c == 0x2028 or c == 0x2029 or
             c == 0x202F or c == 0x205F or c == 0x3000;
     }
-    fn renderCodeSpanContent(_: *const OctomarkParser, content: []const u8, o: anytype) !void {
+    fn renderCodeSpanContent(p: *OctomarkParser, content: []const u8, o: anytype) !void {
         if (content.len == 0) return;
         var has_non_space = false;
         for (content) |c| if (!isWhitespace(c)) {
@@ -715,12 +745,12 @@ pub const OctomarkParser = struct {
         while (k < end) {
             const c = content[k];
             if (c == '\n' or c == '\r') {
-                try writeByte(o, ' ');
+                try p.writeByte(o, ' ');
                 if (c == '\r' and k + 1 < end and content[k + 1] == '\n') k += 1;
             } else if (html_escape_map[c]) |e| {
-                try writeAll(o, e);
+                try p.writeAll(o, e);
             } else {
-                try writeByte(o, c);
+                try p.writeByte(o, c);
             }
             k += 1;
         }
@@ -1012,7 +1042,7 @@ pub const OctomarkParser = struct {
         const _s = p.startCall(.parseInlineContentScoped);
         defer p.endCall(.parseInlineContentScoped, _s);
         if (depth > MAX_INLINE_NESTING) {
-            try writeAll(o, text);
+            try p.writeAll(o, text);
             return;
         }
         const saved_reps = p.replacements;
@@ -1038,7 +1068,7 @@ pub const OctomarkParser = struct {
         const _s = p.startCall(.parseInlineContent);
         defer p.endCall(.parseInlineContent, _s);
         if (depth > MAX_INLINE_NESTING) {
-            try writeAll(o, text);
+            try p.writeAll(o, text);
             return;
         }
         try p.renderInline(text, p.replacements.items, o, depth, g_off, plain);
@@ -1179,7 +1209,7 @@ pub const OctomarkParser = struct {
             while (r_idx < reps.len and reps[r_idx].pos < g_off + i) r_idx += 1;
             if (r_idx < reps.len and reps[r_idx].pos == g_off + i) {
                 const rep = reps[r_idx];
-                if (!plain) try writeAll(o, rep.text);
+                if (!plain) try p.writeAll(o, rep.text);
                 i += rep.end - rep.pos;
                 r_idx += 1;
                 continue;
@@ -1191,9 +1221,9 @@ pub const OctomarkParser = struct {
                 var t_end = next;
                 if (!plain) {
                     while (t_end > i and text[t_end - 1] == ' ') t_end -= 1;
-                    if (t_end > i) try writeAll(o, text[i..t_end]);
-                    try writeAll(o, if (next - t_end >= 2) "<br>\n" else "\n");
-                } else if (t_end > i) try writeAll(o, text[i..t_end]);
+                    if (t_end > i) try p.writeAll(o, text[i..t_end]);
+                    try p.writeAll(o, if (next - t_end >= 2) "<br>\n" else "\n");
+                } else if (t_end > i) try p.writeAll(o, text[i..t_end]);
                 i = next + 1;
                 continue;
             }
@@ -1202,7 +1232,7 @@ pub const OctomarkParser = struct {
                 if (next == text.len) while (t_end > i and text[t_end - 1] == ' ') {
                     t_end -= 1;
                 };
-                if (t_end > i) try writeAll(o, text[i..t_end]);
+                if (t_end > i) try p.writeAll(o, text[i..t_end]);
                 i = next;
                 continue;
             }
@@ -1215,7 +1245,7 @@ pub const OctomarkParser = struct {
                     if (i + 1 < text.len) {
                         const n = text[i + 1];
                         if (n == '\n' or n == '\r') {
-                            try writeAll(o, "<br>\n");
+                            try p.writeAll(o, "<br>\n");
                             if (n == '\r' and i + 2 < text.len and text[i + 2] == '\n') {
                                 i += 3;
                             } else {
@@ -1246,18 +1276,18 @@ pub const OctomarkParser = struct {
                     while (i + cnt < text.len and text[i + cnt] == '`') cnt += 1;
                     if (OctomarkParser.findClosingBackticks(text, i + cnt, cnt)) |m_pos| {
                         const content = text[i + cnt .. m_pos];
-                        if (!plain) try writeAll(o, "<code>");
+                        if (!plain) try p.writeAll(o, "<code>");
                         try p.renderCodeSpanContent(content, o);
-                        if (!plain) try writeAll(o, "</code>");
+                        if (!plain) try p.writeAll(o, "</code>");
                         i = m_pos + cnt;
                         h = true;
                     } else {
                         if (html_escape_map['`']) |e| {
                             var k: usize = 0;
-                            while (k < cnt) : (k += 1) try writeAll(o, e);
+                            while (k < cnt) : (k += 1) try p.writeAll(o, e);
                         } else {
                             var k: usize = 0;
-                            while (k < cnt) : (k += 1) try writeByte(o, '`');
+                            while (k < cnt) : (k += 1) try p.writeByte(o, '`');
                         }
                         i += cnt;
                         h = true;
@@ -1274,7 +1304,7 @@ pub const OctomarkParser = struct {
                                 } else {
                                     const url = text[m.dest.dest_start..m.dest.dest_end];
                                     const tit = if (m.dest.title_start) |ts| text[ts..m.dest.title_end.?] else null;
-                                    try writeAll(o, if (img) "<img src=\"" else "<a href=\"");
+                                    try p.writeAll(o, if (img) "<img src=\"" else "<a href=\"");
                                     var u: usize = 0;
                                     while (u < url.len) {
                                         if (url[u] == '&') {
@@ -1283,11 +1313,11 @@ pub const OctomarkParser = struct {
                                             if (dr.len > 0) {
                                                 for (db[0..dr.len]) |b| {
                                                     if (needsPercentEncode(b)) {
-                                                        try writeByte(o, '%');
-                                                        try writeHex(o, b);
+                                                        try p.writeByte(o, '%');
+                                                        try p.writeHex(o, b);
                                                     } else if (html_escape_map[b]) |e| {
-                                                        try writeAll(o, e);
-                                                    } else try writeByte(o, b);
+                                                        try p.writeAll(o, e);
+                                                    } else try p.writeByte(o, b);
                                                 }
                                                 u += dr.consumed;
                                                 continue;
@@ -1303,20 +1333,20 @@ pub const OctomarkParser = struct {
                                                 if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and
                                                     std.ascii.isHex(url[u + 2]))
                                                 {
-                                                    try writeByte(o, ch);
-                                                } else try writeAll(o, "%25");
+                                                    try p.writeByte(o, ch);
+                                                } else try p.writeAll(o, "%25");
                                             } else {
-                                                try writeByte(o, '%');
-                                                try writeHex(o, ch);
+                                                try p.writeByte(o, '%');
+                                                try p.writeHex(o, ch);
                                             }
                                         } else if (html_escape_map[ch]) |e| {
-                                            try writeAll(o, e);
-                                        } else try writeByte(o, ch);
+                                            try p.writeAll(o, e);
+                                        } else try p.writeByte(o, ch);
                                         u += 1;
                                     }
-                                    try writeByte(o, '"');
+                                    try p.writeByte(o, '"');
                                     if (tit) |t| {
-                                        try writeAll(o, " title=\"");
+                                        try p.writeAll(o, " title=\"");
                                         var ti: usize = 0;
                                         while (ti < t.len) {
                                             if (t[ti] == '&') {
@@ -1331,19 +1361,19 @@ pub const OctomarkParser = struct {
                                             if (t[ti] == '\\' and ti + 1 < t.len and isAsciiPunct(t[ti + 1])) {
                                                 ti += 1;
                                             }
-                                            if (html_escape_map[t[ti]]) |e| try writeAll(o, e) else try writeByte(o, t[ti]);
+                                            if (html_escape_map[t[ti]]) |e| try p.writeAll(o, e) else try p.writeByte(o, t[ti]);
                                             ti += 1;
                                         }
-                                        try writeByte(o, '"');
+                                        try p.writeByte(o, '"');
                                     }
                                     if (img) {
-                                        try writeAll(o, " alt=\"");
+                                        try p.writeAll(o, " alt=\"");
                                         try p.parseInlineContentScoped(label, o, depth + 1, true);
-                                        try writeAll(o, "\">");
+                                        try p.writeAll(o, "\">");
                                     } else {
-                                        try writeAll(o, ">");
+                                        try p.writeAll(o, ">");
                                         try p.parseInlineContentScoped(label, o, depth + 1, false);
-                                        try writeAll(o, "</a>");
+                                        try p.writeAll(o, "</a>");
                                     }
                                 }
                                 i = m.dest.end;
@@ -1356,37 +1386,37 @@ pub const OctomarkParser = struct {
                     if (parseAutolink(text, i)) |a| {
                         const lc = text[a.content_start..a.content_end];
                         if (!plain) {
-                            try writeAll(o, "<a href=\"");
-                            if (a.is_email) try writeAll(o, "mailto:");
+                            try p.writeAll(o, "<a href=\"");
+                            if (a.is_email) try p.writeAll(o, "mailto:");
                             for (lc) |ch| {
                                 if (ch == '\\') {
-                                    try writeAll(o, "%5C");
+                                    try p.writeAll(o, "%5C");
                                 } else if (ch == '&') {
-                                    try writeAll(o, "&amp;");
+                                    try p.writeAll(o, "&amp;");
                                 } else if (needsPercentEncode(ch)) {
                                     if (ch == '%') {
-                                        try writeAll(o, "%25");
+                                        try p.writeAll(o, "%25");
                                     } else {
-                                        try writeByte(o, '%');
-                                        try writeHex(o, ch);
+                                        try p.writeByte(o, '%');
+                                        try p.writeHex(o, ch);
                                     }
                                 } else if (html_escape_map[ch]) |e| {
-                                    try writeAll(o, e);
+                                    try p.writeAll(o, e);
                                 } else {
-                                    try writeByte(o, ch);
+                                    try p.writeByte(o, ch);
                                 }
                             }
-                            try writeAll(o, "\">");
+                            try p.writeAll(o, "\">");
                         }
                         try p.esc(lc, o);
-                        if (!plain) try writeAll(o, "</a>");
+                        if (!plain) try p.writeAll(o, "</a>");
                         i = a.end;
                         h = true;
                     }
                     if (!h and p.options.enable_html) {
                         const l = p.parseHtmlTag(text[i..]);
                         if (l > 0) {
-                            if (!plain) try writeAll(o, text[i .. i + l]);
+                            if (!plain) try p.writeAll(o, text[i .. i + l]);
                             i += l;
                             h = true;
                         }
@@ -1406,9 +1436,9 @@ pub const OctomarkParser = struct {
                         }
                     }
                     if (m_e) |j| {
-                        if (!plain) try writeAll(o, "<span class=\"math\">");
+                        if (!plain) try p.writeAll(o, "<span class=\"math\">");
                         try p.esc(text[i + 1 .. j], o);
-                        if (!plain) try writeAll(o, "</span>");
+                        if (!plain) try p.writeAll(o, "</span>");
                         i = j + 1;
                         h = true;
                     }
@@ -1421,13 +1451,13 @@ pub const OctomarkParser = struct {
                         i += dr.consumed;
                         h = true;
                     } else {
-                        try writeAll(o, "&amp;");
+                        try p.writeAll(o, "&amp;");
                         i += 1;
                         h = true;
                     }
                 },
                 '>', '"', '\'' => {
-                    try writeAll(o, html_escape_map[c].?);
+                    try p.writeAll(o, html_escape_map[c].?);
                     i += 1;
                     h = true;
                 },
@@ -1438,7 +1468,7 @@ pub const OctomarkParser = struct {
                 ec = text[i];
                 i += 1;
             }
-            if (em) if (html_escape_map[ec]) |e| try writeAll(o, e) else try writeByte(o, ec);
+            if (em) if (html_escape_map[ec]) |e| try p.writeAll(o, e) else try p.writeByte(o, ec);
         }
     }
     fn parseIndentedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
@@ -1462,14 +1492,14 @@ pub const OctomarkParser = struct {
             try parser.closeP(output);
             try parser.pushBlock(.indented_code, 0);
             parser.pending_code_blank_lines.clearRetainingCapacity();
-            try writeAll(output, "<pre><code>");
+            try parser.writeAll(output, "<pre><code>");
             const extra_spaces = leading_spaces - required_indent;
             var pad: usize = 0;
             while (pad < extra_spaces) : (pad += 1) {
-                try writeByte(output, ' ');
+                try parser.writeByte(output, ' ');
             }
             try parser.esc(line_content, output);
-            try writeByte(output, '\n');
+            try parser.writeByte(output, '\n');
             return true;
         }
         return false;
@@ -1511,10 +1541,10 @@ pub const OctomarkParser = struct {
             }
             var pad: usize = 0;
             while (pad < stripped.extra_indent_columns) : (pad += 1) {
-                try writeByte(output, ' ');
+                try parser.writeByte(output, ' ');
             }
-            try writeAll(output, text_slice);
-            try writeByte(output, '\n');
+            try parser.writeAll(output, text_slice);
+            try parser.writeByte(output, '\n');
             if (h_type <= 5) {
                 var term = false;
                 if (h_type == 1) {
@@ -1623,9 +1653,9 @@ pub const OctomarkParser = struct {
                 for (parser.pending_code_blank_lines.items) |extra| {
                     var pad: usize = 0;
                     while (pad < extra) : (pad += 1) {
-                        try writeByte(output, ' ');
+                        try parser.writeByte(output, ' ');
                     }
-                    try writeByte(output, '\n');
+                    try parser.writeByte(output, '\n');
                 }
                 parser.pending_code_blank_lines.clearRetainingCapacity();
             }
@@ -1641,10 +1671,10 @@ pub const OctomarkParser = struct {
         }
         var pad: usize = 0;
         while (pad < prefix_spaces) : (pad += 1) {
-            try writeByte(output, ' ');
+            try parser.writeByte(output, ' ');
         }
         try parser.esc(text_slice, output);
-        try writeByte(output, '\n');
+        try parser.writeByte(output, '\n');
         return true;
     }
     fn parseFencedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
@@ -1669,7 +1699,7 @@ pub const OctomarkParser = struct {
             if (block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderTop(output);
             }
-            try writeAll(output, "<pre><code");
+            try parser.writeAll(output, "<pre><code");
             var info_start = f_count;
             while (info_start < content.len and (content[info_start] == ' ' or content[info_start] == '\t')) : (info_start += 1) {}
             var info_end = info_start;
@@ -1681,7 +1711,7 @@ pub const OctomarkParser = struct {
                 }
             }
             if (info_end > info_start) {
-                try writeAll(output, " class=\"language-");
+                try parser.writeAll(output, " class=\"language-");
                 var k = info_start;
                 while (k < info_end) {
                     if (content[k] == '&') {
@@ -1695,17 +1725,17 @@ pub const OctomarkParser = struct {
                     }
                     if (content[k] == '\\' and k + 1 < info_end and isAsciiPunct(content[k + 1])) {
                         k += 1;
-                        try writeByte(output, content[k]);
+                        try parser.writeByte(output, content[k]);
                     } else if (html_escape_map[content[k]]) |e| {
-                        try writeAll(output, e);
+                        try parser.writeAll(output, e);
                     } else {
-                        try writeByte(output, content[k]);
+                        try parser.writeByte(output, content[k]);
                     }
                     k += 1;
                 }
-                try writeAll(output, "\"");
+                try parser.writeAll(output, "\"");
             }
-            try writeAll(output, ">");
+            try parser.writeAll(output, ">");
             try parser.pushBlock(.code, @intCast(leading_spaces + extra_spaces));
             parser.block_stack[parser.stack_depth - 1].fence_char = f_char;
             parser.block_stack[parser.stack_depth - 1].fence_count = @intCast(f_count);
@@ -1723,7 +1753,7 @@ pub const OctomarkParser = struct {
             if (block_type == .paragraph or block_type == .table or block_type == .code or block_type == .math) {
                 try parser.renderTop(output);
             }
-            try writeAll(output, "<div class=\"math\">\n");
+            try parser.writeAll(output, "<div class=\"math\">\n");
             try parser.pushBlock(.math, @intCast(leading_spaces + extra_spaces));
             const remainder = content[2..];
             const trimmed_rem = std.mem.trim(u8, remainder, " \t");
@@ -1731,11 +1761,11 @@ pub const OctomarkParser = struct {
                 if (trimmed_rem.len >= 2 and std.mem.eql(u8, trimmed_rem[trimmed_rem.len - 2 ..], "$$")) {
                     const math_content = std.mem.trim(u8, trimmed_rem[0 .. trimmed_rem.len - 2], " \t");
                     try parser.esc(math_content, output);
-                    try writeByte(output, '\n');
+                    try parser.writeByte(output, '\n');
                     try parser.renderTop(output);
                 } else {
                     try parser.esc(remainder, output);
-                    try writeByte(output, '\n');
+                    try parser.writeByte(output, '\n');
                 }
             }
             return true;
@@ -1772,13 +1802,13 @@ pub const OctomarkParser = struct {
             try parser.tryCloseLeaf(output);
             parser.listItemMarkBlock();
             const level_char: u8 = '0' + @as(u8, @intCast(level));
-            try writeAll(output, "<h");
-            try writeByte(output, level_char);
-            try writeAll(output, ">");
+            try parser.writeAll(output, "<h");
+            try parser.writeByte(output, level_char);
+            try parser.writeAll(output, ">");
             try parser.parseInlineContent(line_content[content_start..end], output);
-            try writeAll(output, "</h");
-            try writeByte(output, level_char);
-            try writeAll(output, ">\n");
+            try parser.writeAll(output, "</h");
+            try parser.writeByte(output, level_char);
+            try parser.writeAll(output, ">\n");
             return true;
         }
         return false;
@@ -1789,7 +1819,7 @@ pub const OctomarkParser = struct {
         if (leading_spaces <= 3 and isThematicBreakLine(line_content)) {
             try parser.tryCloseLeaf(output);
             parser.listItemMarkBlock();
-            try writeAll(output, "<hr>\n");
+            try parser.writeAll(output, "<hr>\n");
             return true;
         }
         return false;
@@ -1813,7 +1843,7 @@ pub const OctomarkParser = struct {
                 if (entry.block_type == .definition_description) in_dd = true;
             }
             if (!in_dl) {
-                try writeAll(output, "<dl>\n");
+                try parser.writeAll(output, "<dl>\n");
                 try parser.pushBlock(.definition_list, @intCast(leading_spaces.*));
             }
             if (in_dd) {
@@ -1821,7 +1851,7 @@ pub const OctomarkParser = struct {
                     try parser.renderTop(output);
                 }
             }
-            try writeAll(output, "<dd>");
+            try parser.writeAll(output, "<dd>");
             try parser.pushBlock(.definition_description, @intCast(leading_spaces.*));
             line_content.* = line;
             leading_spaces.* += consumed;
@@ -1835,18 +1865,7 @@ pub const OctomarkParser = struct {
         var line = line_content.*;
         if (line.len == 0) return false;
         if (isThematicBreakLine(line)) return false;
-        if (leading_spaces.* >= 4) {
-            var has_list = false;
-            var i: usize = 0;
-            while (i < parser.stack_depth) : (i += 1) {
-                const bt = parser.block_stack[i].block_type;
-                if (bt == .unordered_list or bt == .ordered_list) {
-                    has_list = true;
-                    break;
-                }
-            }
-            if (!has_list) return false;
-        }
+        if (leading_spaces.* >= 4 and parser.active_list_stack_idx < 0) return false;
         const trimmed_line = std.mem.trimLeft(u8, line, " ");
         const internal_spaces = line.len - trimmed_line.len;
         // Unordered list marker: -, *, +
@@ -1907,35 +1926,20 @@ pub const OctomarkParser = struct {
         if (is_ul or is_ol) {
             const rem_check = std.mem.trimLeft(u8, line[internal_spaces + marker_bytes ..], " \t");
             if (rem_check.len == 0 and (parser.topT() == .paragraph or parser.paragraph_content.items.len > 0)) {
-                var in_list = false;
-                var li: usize = 0;
-                while (li < parser.stack_depth) : (li += 1) {
-                    const bt = parser.block_stack[li].block_type;
-                    if (bt == .unordered_list or bt == .ordered_list) {
-                        in_list = true;
-                        break;
-                    }
-                }
-                if (!in_list) return false;
+                if (parser.active_list_stack_idx < 0) return false;
             }
             const target_marker = if (is_ul) line[internal_spaces] else ol_marker_char;
             const target_type: BlockType = if (is_ul) .unordered_list else .ordered_list;
             const current_indent: i32 = @intCast(leading_spaces.* + internal_spaces);
             var normalized_indent = current_indent;
-            var top_list_indent: ?i32 = null;
-            var top_list_content: ?i32 = null;
-            if (parser.stack_depth > 0) {
-                var li: usize = parser.stack_depth;
-                while (li > 0) {
-                    li -= 1;
-                    const bt = parser.block_stack[li].block_type;
-                    if (bt == .unordered_list or bt == .ordered_list) {
-                        top_list_indent = parser.block_stack[li].indent_level;
-                        top_list_content = parser.block_stack[li].content_indent;
-                        break;
-                    }
-                }
-            }
+            const top_list_indent: ?i32 = if (parser.active_list_stack_idx >= 0)
+                parser.block_stack[@intCast(parser.active_list_stack_idx)].indent_level
+            else
+                null;
+            const top_list_content: ?i32 = if (parser.active_list_stack_idx >= 0)
+                parser.block_stack[@intCast(parser.active_list_stack_idx)].content_indent
+            else
+                null;
             if (top_list_indent != null and top_list_content != null) {
                 const tli = top_list_indent.?;
                 const tlc = top_list_content.?;
@@ -1988,39 +1992,29 @@ pub const OctomarkParser = struct {
             const list_loose = (top == .unordered_list or top == .ordered_list) and
                 parser.block_stack[parser.stack_depth - 1].loose;
             if (parser.paragraph_content.items.len > 0) {
-                if (list_loose and parser.topT() != .paragraph) {
-                    parser.listItemMarkParagraph();
-                    try writeAll(output, "<p>");
-                    try parser.parseInlineContent(parser.paragraph_content.items, output);
-                    parser.paragraph_content.clearRetainingCapacity();
-                    try writeAll(output, "</p>\n");
-                } else {
-                    const start_pos = if (parser.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                    try parser.parseInlineContent(parser.paragraph_content.items, output);
-                    if (parser.currentListBuffer()) |lb| parser.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
-                    parser.paragraph_content.clearRetainingCapacity();
-                }
+                const wrap_paragraph = list_loose and parser.topT() != .paragraph;
+                try parser.flushListParagraph(output, wrap_paragraph);
             }
             if (top == target_type and parser.block_stack[parser.stack_depth - 1].indent_level == normalized_indent) {
                 parser.listItemEnd();
-                try writeAll(output, "</li>\n<li>");
+                try parser.writeAll(output, "</li>\n<li>");
                 parser.listItemStart();
             } else {
                 if (target_type == .unordered_list) {
-                    try writeAll(output, "<ul>\n<li>");
+                    try parser.writeAll(output, "<ul>\n<li>");
                     try parser.pushBlockExtra(target_type, current_indent, target_marker);
                     parser.listItemStart();
                 } else {
                     const start_num = std.fmt.parseInt(u32, line[internal_spaces .. internal_spaces + marker_bytes -
                         2], 10) catch 1;
                     if (start_num != 1) {
-                        try writeAll(output, "<ol start=\"");
+                        try parser.writeAll(output, "<ol start=\"");
                         var num_buf: [11]u8 = undefined;
                         const num_str = std.fmt.bufPrint(&num_buf, "{d}", .{start_num}) catch "1";
-                        try writeAll(output, num_str);
-                        try writeAll(output, "\">\n<li>");
+                        try parser.writeAll(output, num_str);
+                        try parser.writeAll(output, "\">\n<li>");
                     } else {
-                        try writeAll(output, "<ol>\n<li>");
+                        try parser.writeAll(output, "<ol>\n<li>");
                     }
                     try parser.pushBlockExtra(target_type, current_indent, target_marker);
                     parser.block_stack[parser.stack_depth - 1].list_start = start_num;
@@ -2077,16 +2071,16 @@ pub const OctomarkParser = struct {
             if (has_pipe) {
                 var body_cells: [64][]const u8 = undefined;
                 const body_count = parser.splitTableRowCells(line_content, &body_cells);
-                try writeAll(output, "<tr>");
+                try parser.writeAll(output, "<tr>");
                 var k: usize = 0;
                 while (k < body_count) : (k += 1) {
-                    try writeAll(output, "<td");
-                    writeTableAlignment(output, if (k < parser.table_column_count) parser.table_alignments[k] else .none) catch {};
-                    try writeAll(output, ">");
+                    try parser.writeAll(output, "<td");
+                    writeTableAlignment(parser, output, if (k < parser.table_column_count) parser.table_alignments[k] else .none) catch {};
+                    try parser.writeAll(output, ">");
                     try parser.parseInlineContent(body_cells[k], output);
-                    try writeAll(output, "</td>");
+                    try parser.writeAll(output, "</td>");
                 }
-                try writeAll(output, "</tr>\n");
+                try parser.writeAll(output, "</tr>\n");
                 return true;
             } else { // No pipe = end of table
                 try parser.renderTop(output); // Continue to process this line as something else (return false)
@@ -2120,16 +2114,16 @@ pub const OctomarkParser = struct {
             parser.table_alignments[k] = col_align;
         }
         try parser.tryCloseLeaf(output);
-        try writeAll(output, "<table><thead><tr>");
+        try parser.writeAll(output, "<table><thead><tr>");
         k = 0;
         while (k < header_count) : (k += 1) {
-            try writeAll(output, "<th");
-            writeTableAlignment(output, parser.table_alignments[k]) catch {};
-            try writeAll(output, ">");
+            try parser.writeAll(output, "<th");
+            writeTableAlignment(parser, output, parser.table_alignments[k]) catch {};
+            try parser.writeAll(output, ">");
             try parser.parseInlineContent(header_cells[k], output);
-            try writeAll(output, "</th>");
+            try parser.writeAll(output, "</th>");
         }
-        try writeAll(output, "</tr></thead><tbody>\n");
+        try parser.writeAll(output, "</tr></thead><tbody>\n");
         try parser.pushBlock(.table, 0);
         return true;
     }
@@ -2146,12 +2140,12 @@ pub const OctomarkParser = struct {
                     try parser.renderTop(output);
                 }
                 if (parser.stack_depth == 0 or parser.topT() != .definition_list) {
-                    try writeAll(output, "<dl>\n");
+                    try parser.writeAll(output, "<dl>\n");
                     try parser.pushBlock(.definition_list, 0);
                 }
-                try writeAll(output, "<dt>");
+                try parser.writeAll(output, "<dt>");
                 try parser.parseInlineContent(line_content, output);
-                try writeAll(output, "</dt>\n");
+                try parser.writeAll(output, "</dt>\n");
                 return true;
             }
         }
@@ -2169,25 +2163,14 @@ pub const OctomarkParser = struct {
             (block_type != null and
                 (@intFromEnum(block_type.?) < @intFromEnum(BlockType.blockquote) or block_type.? ==
                     .definition_description)));
-        var list_loose = false;
-        if (parser.stack_depth > 0) {
-            var i: usize = parser.stack_depth;
-            while (i > 0) {
-                i -= 1;
-                const bt = parser.block_stack[i].block_type;
-                if (bt == .unordered_list or bt == .ordered_list) {
-                    list_loose = parser.block_stack[i].loose;
-                    break;
-                }
-            }
-        }
+        const list_loose = if (parser.active_list_stack_idx >= 0) parser.block_stack[@intCast(parser.active_list_stack_idx)].loose else false;
         if (parser.topT() != .paragraph and (!in_container or list_loose)) {
             try parser.pushBlock(.paragraph, 0);
         } else if (parser.topT() == .paragraph or (in_container and !is_list and !is_dl and !list_loose)) {
             try parser.paragraph_content.append(parser.allocator, '\n');
         }
         if (parser.pending_task_marker > 0) {
-            try writeAll(output, if (parser.pending_task_marker == 2)
+            try parser.writeAll(output, if (parser.pending_task_marker == 2)
                 "<input type=\"checkbox\" checked disabled> "
             else
                 "<input type=\"checkbox\" disabled> ");
@@ -2230,44 +2213,7 @@ pub const OctomarkParser = struct {
         var lc = line[id.idx..];
         if (lc.len == 0) {
             p.prev_line_blank = true;
-            const top_bt = p.topT();
-            if (top_bt == .paragraph or top_bt == .table or top_bt == .code or top_bt == .math) try p.renderTop(o);
-            var l_idx: ?usize = null;
-            if (p.stack_depth > 0) {
-                var i = p.stack_depth;
-                while (i > 0) {
-                    i -= 1;
-                    const bt = p.block_stack[i].block_type;
-                    if (bt == .unordered_list or bt == .ordered_list) {
-                        l_idx = i;
-                        break;
-                    }
-                }
-            }
-            if (l_idx != null and p.paragraph_content.items.len > 0) {
-                const list_loose = p.block_stack[l_idx.?].loose;
-                if (list_loose) {
-                    p.listItemMarkParagraph();
-                    try writeAll(o, "<p>");
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    p.paragraph_content.clearRetainingCapacity();
-                    try writeAll(o, "</p>\n");
-                } else {
-                    const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
-                    p.paragraph_content.clearRetainingCapacity();
-                }
-            }
-            if (l_idx) |idx| {
-                p.pending_loose_idx = idx;
-            }
-            while (p.stack_depth > 0 and p.topT() != null and @intFromEnum(p.topT().?) >=
-                @intFromEnum(BlockType.blockquote))
-            {
-                try p.renderTop(o);
-            }
-            return false;
+            return try p.handleBlankLine(o, null, true);
         }
         const prev_blank = p.prev_line_blank;
         p.prev_line_blank = false;
@@ -2313,27 +2259,16 @@ pub const OctomarkParser = struct {
                 }
             }
         }
-        var cur_q: usize = 0;
-        for (p.block_stack[0..p.stack_depth]) |e| {
-            if (e.block_type == .blockquote) cur_q += 1;
-        }
+        var cur_q: usize = p.blockquote_depth;
         if (q_lv > 0) {
             var remove: usize = 0;
             if (cur_q > 0) {
                 remove = if (ls > 3) 3 else ls;
             } else {
-                var list_content_indent: ?usize = null;
-                if (p.stack_depth > 0) {
-                    var i = p.stack_depth;
-                    while (i > 0) {
-                        i -= 1;
-                        const bt = p.block_stack[i].block_type;
-                        if (bt == .unordered_list or bt == .ordered_list) {
-                            list_content_indent = @intCast(p.block_stack[i].content_indent);
-                            break;
-                        }
-                    }
-                }
+                const list_content_indent: ?usize = if (p.active_list_stack_idx >= 0)
+                    @intCast(p.block_stack[@intCast(p.active_list_stack_idx)].content_indent)
+                else
+                    null;
                 if (list_content_indent) |lci| {
                     if (ls >= lci) {
                         const extra = ls - lci;
@@ -2370,15 +2305,12 @@ pub const OctomarkParser = struct {
                 try p.parseInlineContent(p.paragraph_content.items, o);
                 p.paragraph_content.clearRetainingCapacity();
             }
-            try writeAll(o, "<blockquote>");
+            try p.writeAll(o, "<blockquote>");
             try p.pushBlock(.blockquote, 0);
             cur_q += 1;
         }
         if (lc.len == 0) {
             p.prev_line_blank = true;
-            const top_bt = p.topT();
-            if (top_bt == .paragraph or top_bt == .table or top_bt == .code or top_bt == .math) try p.renderTop(o);
-            var l_idx: ?usize = null;
             var bq_idx: ?usize = null;
             if (p.stack_depth > 0) {
                 var i = p.stack_depth;
@@ -2386,32 +2318,9 @@ pub const OctomarkParser = struct {
                     i -= 1;
                     const bt = p.block_stack[i].block_type;
                     if (bq_idx == null and bt == .blockquote) bq_idx = i;
-                    if (bt == .unordered_list or bt == .ordered_list) {
-                        l_idx = i;
-                        break;
-                    }
                 }
             }
-            if (l_idx != null and p.paragraph_content.items.len > 0) {
-                const list_loose = p.block_stack[l_idx.?].loose;
-                if (list_loose) {
-                    p.listItemMarkParagraph();
-                    try writeAll(o, "<p>");
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    p.paragraph_content.clearRetainingCapacity();
-                    try writeAll(o, "</p>\n");
-                } else {
-                    const start_pos = if (p.currentListBuffer()) |lb| lb.bytes.items.len else 0;
-                    try p.parseInlineContent(p.paragraph_content.items, o);
-                    if (p.currentListBuffer()) |lb| p.listItemRecordParagraphSpan(start_pos, lb.bytes.items.len);
-                    p.paragraph_content.clearRetainingCapacity();
-                }
-            }
-            if (l_idx) |idx| {
-                const suppress = bq_idx != null and bq_idx.? > idx;
-                if (!suppress) p.pending_loose_idx = idx;
-            }
-            return false;
+            return try p.handleBlankLine(o, bq_idx, false);
         }
         const is_dl = try p.parseDefinitionList(&lc, &ls, o);
         var is_list = try p.parseListItem(&lc, &ls, o);
@@ -2425,19 +2334,10 @@ pub const OctomarkParser = struct {
         if (is_list and lc.len > 0) {
             var nest_attempts: usize = 0;
             while (nest_attempts < 2 and lc.len > 0) : (nest_attempts += 1) {
-                var list_idx: ?usize = null;
+                const list_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
                 var list_content_indent: usize = 0;
-                if (p.stack_depth > 0) {
-                    var i = p.stack_depth;
-                    while (i > 0) {
-                        i -= 1;
-                        const bt = p.block_stack[i].block_type;
-                        if (bt == .unordered_list or bt == .ordered_list) {
-                            list_idx = i;
-                            list_content_indent = @intCast(p.block_stack[i].content_indent);
-                            break;
-                        }
-                    }
+                if (list_idx) |idx| {
+                    list_content_indent = @intCast(p.block_stack[idx].content_indent);
                 }
                 if (list_idx != null and ls >= list_content_indent) {
                     var lc2 = lc;
@@ -2459,21 +2359,12 @@ pub const OctomarkParser = struct {
                 break;
             }
         }
-        var list_idx: ?usize = null;
+        const list_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
         var list_content_indent: usize = 0;
         var list_indent: usize = 0;
-        if (p.stack_depth > 0) {
-            var i = p.stack_depth;
-            while (i > 0) {
-                i -= 1;
-                const bt = p.block_stack[i].block_type;
-                if (bt == .unordered_list or bt == .ordered_list) {
-                    list_idx = i;
-                    list_content_indent = @intCast(p.block_stack[i].content_indent);
-                    list_indent = @intCast(p.block_stack[i].indent_level);
-                    break;
-                }
-            }
+        if (list_idx) |idx| {
+            list_content_indent = @intCast(p.block_stack[idx].content_indent);
+            list_indent = @intCast(p.block_stack[idx].indent_level);
         }
         var list_lazy = false;
         if (list_idx != null and !is_list and !is_dl and lc.len > 0 and !lazy and !prev_blank) {
@@ -2544,17 +2435,7 @@ pub const OctomarkParser = struct {
             }
             if (ls <= 3 and isThematicBreakLine(lc)) {
                 if (p.stack_depth > 0) {
-                    var l_id: ?i32 = null;
-                    var i = p.stack_depth;
-                    while (i > 0) {
-                        i -= 1;
-                        if (p.block_stack[i].block_type == .unordered_list or p.block_stack[i].block_type ==
-                            .ordered_list)
-                        {
-                            l_id = p.block_stack[i].content_indent;
-                            break;
-                        }
-                    }
+                    const l_id: ?i32 = if (p.active_list_stack_idx >= 0) p.block_stack[@intCast(p.active_list_stack_idx)].content_indent else null;
                     if (l_id) |lim| {
                         if (ls < @as(usize, @intCast(lim))) {
                             try p.closeP(o);
@@ -2581,13 +2462,13 @@ pub const OctomarkParser = struct {
                             p.paragraph_content.clearRetainingCapacity();
                             if (p.topT() == .paragraph) p.pop();
                             const lv: u8 = if (lc[st] == '=') '1' else '2';
-                            try writeAll(o, "<h");
-                            try writeByte(o, lv);
-                            try writeAll(o, ">");
+                            try p.writeAll(o, "<h");
+                            try p.writeByte(o, lv);
+                            try p.writeAll(o, ">");
                             try p.parseInlineContent(tr, o);
-                            try writeAll(o, "</h");
-                            try writeByte(o, lv);
-                            try writeAll(o, ">\n");
+                            try p.writeAll(o, "</h");
+                            try p.writeByte(o, lv);
+                            try p.writeAll(o, ">\n");
                             return false;
                         }
                     }
@@ -2603,17 +2484,12 @@ pub const OctomarkParser = struct {
                     var q_lc = lc;
                     var q_ls = ls;
                     if (p.stack_depth > 0) {
-                        var i = p.stack_depth;
-                        while (i > 0) {
-                            i -= 1;
-                            const bt = p.block_stack[i].block_type;
-                            if (bt == .unordered_list or bt == .ordered_list) {
-                                const li: usize = @intCast(p.block_stack[i].content_indent);
-                                if (ls >= li) {
-                                    q_lc = stripIndentColumns(lc, li);
-                                    q_ls = ls - li;
-                                }
-                                break;
+                        const l_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
+                        if (l_idx) |idx| {
+                            const li: usize = @intCast(p.block_stack[idx].content_indent);
+                            if (ls >= li) {
+                                q_lc = stripIndentColumns(lc, li);
+                                q_ls = ls - li;
                             }
                         }
                     }
@@ -2635,7 +2511,7 @@ pub const OctomarkParser = struct {
                             try p.closeP(o);
                             var k: usize = 0;
                             while (k < q_c) : (k += 1) {
-                                try writeAll(o, "<blockquote>");
+                                try p.writeAll(o, "<blockquote>");
                                 try p.pushBlock(.blockquote, 0);
                             }
                         }
@@ -2686,9 +2562,9 @@ pub const OctomarkParser = struct {
                         try p.tryCloseLeaf(o);
                         try p.pushBlockExtra(.html_block, 0, h_t);
                         var pad: usize = 0;
-                        while (pad < html_ls) : (pad += 1) try writeByte(o, ' ');
-                        try writeAll(o, lc);
-                        try writeByte(o, '\n');
+                        while (pad < html_ls) : (pad += 1) try p.writeByte(o, ' ');
+                        try p.writeAll(o, lc);
+                        try p.writeByte(o, '\n');
                         var term = false;
                         if (h_t == 1) {
                             const tags = [_][]const u8{ "</script>", "</pre>", "</style>", "</textarea>" };
@@ -2868,11 +2744,11 @@ pub const OctomarkParser = struct {
         }
         return count;
     }
-    fn writeTableAlignment(output: anytype, align_type: TableAlignment) !void {
+    fn writeTableAlignment(parser: *OctomarkParser, output: anytype, align_type: TableAlignment) !void {
         try switch (align_type) {
-            .left => writeAll(output, " style=\"text-align:left\""),
-            .center => writeAll(output, " style=\"text-align:center\""),
-            .right => writeAll(output, " style=\"text-align:right\""),
+            .left => parser.writeAll(output, " style=\"text-align:left\""),
+            .center => parser.writeAll(output, " style=\"text-align:center\""),
+            .right => parser.writeAll(output, " style=\"text-align:right\""),
             .none => {},
         };
     }
