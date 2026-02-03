@@ -755,6 +755,258 @@ pub const OctomarkParser = struct {
             k += 1;
         }
     }
+    const InlineHandleResult = struct {
+        handled: bool,
+        emit_char: ?u8,
+    };
+    fn writeEscapedByte(p: *OctomarkParser, o: anytype, ch: u8) !void {
+        if (html_escape_map[ch]) |e| {
+            try p.writeAll(o, e);
+        } else {
+            try p.writeByte(o, ch);
+        }
+    }
+    fn writeLinkUrl(p: *OctomarkParser, url: []const u8, o: anytype) !void {
+        var u: usize = 0;
+        while (u < url.len) {
+            if (url[u] == '&') {
+                var db: [8]u8 = undefined;
+                const dr = decodeEntity(url[u..], &db);
+                if (dr.len > 0) {
+                    for (db[0..dr.len]) |b| {
+                        if (needsPercentEncode(b)) {
+                            try p.writeByte(o, '%');
+                            try p.writeHex(o, b);
+                        } else {
+                            try p.writeEscapedByte(o, b);
+                        }
+                    }
+                    u += dr.consumed;
+                    continue;
+                }
+            }
+            var ch = url[u];
+            if (ch == '\\' and u + 1 < url.len and isAsciiPunct(url[u + 1])) {
+                u += 1;
+                ch = url[u];
+            }
+            if (needsPercentEncode(ch)) {
+                if (ch == '%') {
+                    if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and std.ascii.isHex(url[u + 2])) {
+                        try p.writeByte(o, ch);
+                    } else {
+                        try p.writeAll(o, "%25");
+                    }
+                } else {
+                    try p.writeByte(o, '%');
+                    try p.writeHex(o, ch);
+                }
+            } else {
+                try p.writeEscapedByte(o, ch);
+            }
+            u += 1;
+        }
+    }
+    fn writeLinkTitle(p: *OctomarkParser, title: []const u8, o: anytype) !void {
+        var ti: usize = 0;
+        while (ti < title.len) {
+            if (title[ti] == '&') {
+                var db: [8]u8 = undefined;
+                const dr = decodeEntity(title[ti..], &db);
+                if (dr.len > 0) {
+                    try p.esc(db[0..dr.len], o);
+                    ti += dr.consumed;
+                    continue;
+                }
+            }
+            if (title[ti] == '\\' and ti + 1 < title.len and isAsciiPunct(title[ti + 1])) {
+                ti += 1;
+            }
+            try p.writeEscapedByte(o, title[ti]);
+            ti += 1;
+        }
+    }
+    fn writeAutolinkHref(p: *OctomarkParser, text: []const u8, o: anytype) !void {
+        for (text) |ch| {
+            if (ch == '\\') {
+                try p.writeAll(o, "%5C");
+            } else if (ch == '&') {
+                try p.writeAll(o, "&amp;");
+            } else if (needsPercentEncode(ch)) {
+                if (ch == '%') {
+                    try p.writeAll(o, "%25");
+                } else {
+                    try p.writeByte(o, '%');
+                    try p.writeHex(o, ch);
+                }
+            } else {
+                try p.writeEscapedByte(o, ch);
+            }
+        }
+    }
+    fn handleInlineBackslash(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype) !InlineHandleResult {
+        if (i.* + 1 < text.len) {
+            const n = text[i.* + 1];
+            if (n == '\n' or n == '\r') {
+                try p.writeAll(o, "<br>\n");
+                if (n == '\r' and i.* + 2 < text.len and text[i.* + 2] == '\n') {
+                    i.* += 3;
+                } else {
+                    i.* += 2;
+                }
+                return .{ .handled = true, .emit_char = null };
+            }
+            if (isAsciiPunct(n)) {
+                i.* += 2;
+                return .{ .handled = true, .emit_char = n };
+            }
+            i.* += 1;
+            return .{ .handled = true, .emit_char = '\\' };
+        }
+        i.* += 1;
+        return .{ .handled = true, .emit_char = '\\' };
+    }
+    fn handleInlineCodeSpan(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype, plain: bool) !InlineHandleResult {
+        var cnt: usize = 1;
+        while (i.* + cnt < text.len and text[i.* + cnt] == '`') cnt += 1;
+        if (OctomarkParser.findClosingBackticks(text, i.* + cnt, cnt)) |m_pos| {
+            const content = text[i.* + cnt .. m_pos];
+            if (!plain) try p.writeAll(o, "<code>");
+            try p.renderCodeSpanContent(content, o);
+            if (!plain) try p.writeAll(o, "</code>");
+            i.* = m_pos + cnt;
+        } else {
+            if (html_escape_map['`']) |e| {
+                var k: usize = 0;
+                while (k < cnt) : (k += 1) try p.writeAll(o, e);
+            } else {
+                var k: usize = 0;
+                while (k < cnt) : (k += 1) try p.writeByte(o, '`');
+            }
+            i.* += cnt;
+        }
+        return .{ .handled = true, .emit_char = null };
+    }
+    fn handleInlineLink(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype, depth: usize, plain: bool) !InlineHandleResult {
+        const img = (text[i.*] == '!');
+        if (!img or (i.* + 1 < text.len and text[i.* + 1] == '[')) {
+            if (parseInlineLink(p, text, i.*, img)) |m| {
+                const label = text[m.label_start..m.label_end];
+                if (img or !labelHasLinkLike(p, label)) {
+                    if (plain) {
+                        try p.parseInlineContentScoped(label, o, depth + 1, true);
+                    } else {
+                        const url = text[m.dest.dest_start..m.dest.dest_end];
+                        const tit = if (m.dest.title_start) |ts| text[ts..m.dest.title_end.?] else null;
+                        try p.writeAll(o, if (img) "<img src=\"" else "<a href=\"");
+                        try p.writeLinkUrl(url, o);
+                        try p.writeByte(o, '"');
+                        if (tit) |t| {
+                            try p.writeAll(o, " title=\"");
+                            try p.writeLinkTitle(t, o);
+                            try p.writeByte(o, '"');
+                        }
+                        if (img) {
+                            try p.writeAll(o, " alt=\"");
+                            try p.parseInlineContentScoped(label, o, depth + 1, true);
+                            try p.writeAll(o, "\">");
+                        } else {
+                            try p.writeAll(o, ">");
+                            try p.parseInlineContentScoped(label, o, depth + 1, false);
+                            try p.writeAll(o, "</a>");
+                        }
+                    }
+                    i.* = m.dest.end;
+                    return .{ .handled = true, .emit_char = null };
+                }
+                i.* += 1;
+                return .{ .handled = true, .emit_char = '[' };
+            }
+        }
+        return .{ .handled = false, .emit_char = null };
+    }
+    fn handleInlineAngle(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype, plain: bool) !InlineHandleResult {
+        if (parseAutolink(text, i.*)) |a| {
+            const lc = text[a.content_start..a.content_end];
+            if (!plain) {
+                try p.writeAll(o, "<a href=\"");
+                if (a.is_email) try p.writeAll(o, "mailto:");
+                try p.writeAutolinkHref(lc, o);
+                try p.writeAll(o, "\">");
+            }
+            try p.esc(lc, o);
+            if (!plain) try p.writeAll(o, "</a>");
+            i.* = a.end;
+            return .{ .handled = true, .emit_char = null };
+        }
+        if (p.options.enable_html) {
+            const l = p.parseHtmlTag(text[i.*..]);
+            if (l > 0) {
+                if (!plain) try p.writeAll(o, text[i.* .. i.* + l]);
+                i.* += l;
+                return .{ .handled = true, .emit_char = null };
+            }
+        }
+        return .{ .handled = false, .emit_char = null };
+    }
+    fn handleInlineMath(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype, plain: bool) !InlineHandleResult {
+        var m_e: ?usize = null;
+        var k = i.* + 1;
+        while (k < text.len) : (k += 1) {
+            if (text[k] == '\\' and k + 1 < text.len) {
+                k += 1;
+                continue;
+            }
+            if (text[k] == '$') {
+                m_e = k;
+                break;
+            }
+        }
+        if (m_e) |j| {
+            if (!plain) try p.writeAll(o, "<span class=\"math\">");
+            try p.esc(text[i.* + 1 .. j], o);
+            if (!plain) try p.writeAll(o, "</span>");
+            i.* = j + 1;
+            return .{ .handled = true, .emit_char = null };
+        }
+        return .{ .handled = false, .emit_char = null };
+    }
+    fn handleInlineEntity(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype) !InlineHandleResult {
+        var db: [8]u8 = undefined;
+        const dr = decodeEntity(text[i.*..], &db);
+        if (dr.len > 0) {
+            try p.esc(db[0..dr.len], o);
+            i.* += dr.consumed;
+        } else {
+            try p.writeAll(o, "&amp;");
+            i.* += 1;
+        }
+        return .{ .handled = true, .emit_char = null };
+    }
+    fn handleInlineSpecial(p: *OctomarkParser, text: []const u8, i: *usize, o: anytype, depth: usize, plain: bool) !InlineHandleResult {
+        const c = text[i.*];
+        switch (c) {
+            '\\' => return try p.handleInlineBackslash(text, i, o),
+            '~' => {
+                if (std.mem.startsWith(u8, text[i.*..], "~~")) {
+                    i.* += 2;
+                    return .{ .handled = true, .emit_char = null };
+                }
+            },
+            '`' => return try p.handleInlineCodeSpan(text, i, o, plain),
+            '[', '!' => return try p.handleInlineLink(text, i, o, depth, plain),
+            '<' => return try p.handleInlineAngle(text, i, o, plain),
+            '$' => return try p.handleInlineMath(text, i, o, plain),
+            '&' => return try p.handleInlineEntity(text, i, o),
+            '>', '"', '\'' => {
+                try p.writeAll(o, html_escape_map[c].?);
+                i.* += 1;
+                return .{ .handled = true, .emit_char = null };
+            },
+            else => {},
+        }
+        return .{ .handled = false, .emit_char = null };
+    }
     fn findSpec(p: *OctomarkParser, text: []const u8, start: usize) usize {
         const s = p.startCall(.findSpec);
         defer p.endCall(.findSpec, s);
@@ -1236,239 +1488,13 @@ pub const OctomarkParser = struct {
                 i = next;
                 continue;
             }
-            const c = text[i];
-            var h = false;
-            var em = false;
-            var ec: u8 = 0;
-            switch (c) {
-                '\\' => {
-                    if (i + 1 < text.len) {
-                        const n = text[i + 1];
-                        if (n == '\n' or n == '\r') {
-                            try p.writeAll(o, "<br>\n");
-                            if (n == '\r' and i + 2 < text.len and text[i + 2] == '\n') {
-                                i += 3;
-                            } else {
-                                i += 2;
-                            }
-                        } else if (isAsciiPunct(n)) {
-                            em = true;
-                            ec = n;
-                            i += 2;
-                        } else {
-                            em = true;
-                            ec = '\\';
-                            i += 1;
-                        }
-                    } else {
-                        em = true;
-                        ec = '\\';
-                        i += 1;
-                    }
-                    h = true;
-                },
-                '~' => if (std.mem.startsWith(u8, text[i..], "~~")) {
-                    i += 2;
-                    h = true;
-                },
-                '`' => {
-                    var cnt: usize = 1;
-                    while (i + cnt < text.len and text[i + cnt] == '`') cnt += 1;
-                    if (OctomarkParser.findClosingBackticks(text, i + cnt, cnt)) |m_pos| {
-                        const content = text[i + cnt .. m_pos];
-                        if (!plain) try p.writeAll(o, "<code>");
-                        try p.renderCodeSpanContent(content, o);
-                        if (!plain) try p.writeAll(o, "</code>");
-                        i = m_pos + cnt;
-                        h = true;
-                    } else {
-                        if (html_escape_map['`']) |e| {
-                            var k: usize = 0;
-                            while (k < cnt) : (k += 1) try p.writeAll(o, e);
-                        } else {
-                            var k: usize = 0;
-                            while (k < cnt) : (k += 1) try p.writeByte(o, '`');
-                        }
-                        i += cnt;
-                        h = true;
-                    }
-                },
-                '[', '!' => {
-                    const img = (c == '!');
-                    if (!img or (i + 1 < text.len and text[i + 1] == '[')) {
-                        if (parseInlineLink(p, text, i, img)) |m| {
-                            const label = text[m.label_start..m.label_end];
-                            if (img or !labelHasLinkLike(p, label)) {
-                                if (plain) {
-                                    try p.parseInlineContentScoped(label, o, depth + 1, true);
-                                } else {
-                                    const url = text[m.dest.dest_start..m.dest.dest_end];
-                                    const tit = if (m.dest.title_start) |ts| text[ts..m.dest.title_end.?] else null;
-                                    try p.writeAll(o, if (img) "<img src=\"" else "<a href=\"");
-                                    var u: usize = 0;
-                                    while (u < url.len) {
-                                        if (url[u] == '&') {
-                                            var db: [8]u8 = undefined;
-                                            const dr = decodeEntity(url[u..], &db);
-                                            if (dr.len > 0) {
-                                                for (db[0..dr.len]) |b| {
-                                                    if (needsPercentEncode(b)) {
-                                                        try p.writeByte(o, '%');
-                                                        try p.writeHex(o, b);
-                                                    } else if (html_escape_map[b]) |e| {
-                                                        try p.writeAll(o, e);
-                                                    } else try p.writeByte(o, b);
-                                                }
-                                                u += dr.consumed;
-                                                continue;
-                                            }
-                                        }
-                                        var ch = url[u];
-                                        if (ch == '\\' and u + 1 < url.len and isAsciiPunct(url[u + 1])) {
-                                            u += 1;
-                                            ch = url[u];
-                                        }
-                                        if (needsPercentEncode(ch)) {
-                                            if (ch == '%') {
-                                                if (u + 2 < url.len and std.ascii.isHex(url[u + 1]) and
-                                                    std.ascii.isHex(url[u + 2]))
-                                                {
-                                                    try p.writeByte(o, ch);
-                                                } else try p.writeAll(o, "%25");
-                                            } else {
-                                                try p.writeByte(o, '%');
-                                                try p.writeHex(o, ch);
-                                            }
-                                        } else if (html_escape_map[ch]) |e| {
-                                            try p.writeAll(o, e);
-                                        } else try p.writeByte(o, ch);
-                                        u += 1;
-                                    }
-                                    try p.writeByte(o, '"');
-                                    if (tit) |t| {
-                                        try p.writeAll(o, " title=\"");
-                                        var ti: usize = 0;
-                                        while (ti < t.len) {
-                                            if (t[ti] == '&') {
-                                                var db: [8]u8 = undefined;
-                                                const dr = decodeEntity(t[ti..], &db);
-                                                if (dr.len > 0) {
-                                                    try p.esc(db[0..dr.len], o);
-                                                    ti += dr.consumed;
-                                                    continue;
-                                                }
-                                            }
-                                            if (t[ti] == '\\' and ti + 1 < t.len and isAsciiPunct(t[ti + 1])) {
-                                                ti += 1;
-                                            }
-                                            if (html_escape_map[t[ti]]) |e| try p.writeAll(o, e) else try p.writeByte(o, t[ti]);
-                                            ti += 1;
-                                        }
-                                        try p.writeByte(o, '"');
-                                    }
-                                    if (img) {
-                                        try p.writeAll(o, " alt=\"");
-                                        try p.parseInlineContentScoped(label, o, depth + 1, true);
-                                        try p.writeAll(o, "\">");
-                                    } else {
-                                        try p.writeAll(o, ">");
-                                        try p.parseInlineContentScoped(label, o, depth + 1, false);
-                                        try p.writeAll(o, "</a>");
-                                    }
-                                }
-                                i = m.dest.end;
-                                h = true;
-                            }
-                        }
-                    }
-                },
-                '<' => {
-                    if (parseAutolink(text, i)) |a| {
-                        const lc = text[a.content_start..a.content_end];
-                        if (!plain) {
-                            try p.writeAll(o, "<a href=\"");
-                            if (a.is_email) try p.writeAll(o, "mailto:");
-                            for (lc) |ch| {
-                                if (ch == '\\') {
-                                    try p.writeAll(o, "%5C");
-                                } else if (ch == '&') {
-                                    try p.writeAll(o, "&amp;");
-                                } else if (needsPercentEncode(ch)) {
-                                    if (ch == '%') {
-                                        try p.writeAll(o, "%25");
-                                    } else {
-                                        try p.writeByte(o, '%');
-                                        try p.writeHex(o, ch);
-                                    }
-                                } else if (html_escape_map[ch]) |e| {
-                                    try p.writeAll(o, e);
-                                } else {
-                                    try p.writeByte(o, ch);
-                                }
-                            }
-                            try p.writeAll(o, "\">");
-                        }
-                        try p.esc(lc, o);
-                        if (!plain) try p.writeAll(o, "</a>");
-                        i = a.end;
-                        h = true;
-                    }
-                    if (!h and p.options.enable_html) {
-                        const l = p.parseHtmlTag(text[i..]);
-                        if (l > 0) {
-                            if (!plain) try p.writeAll(o, text[i .. i + l]);
-                            i += l;
-                            h = true;
-                        }
-                    }
-                },
-                '$' => {
-                    var m_e: ?usize = null;
-                    var k = i + 1;
-                    while (k < text.len) : (k += 1) {
-                        if (text[k] == '\\' and k + 1 < text.len) {
-                            k += 1;
-                            continue;
-                        }
-                        if (text[k] == '$') {
-                            m_e = k;
-                            break;
-                        }
-                    }
-                    if (m_e) |j| {
-                        if (!plain) try p.writeAll(o, "<span class=\"math\">");
-                        try p.esc(text[i + 1 .. j], o);
-                        if (!plain) try p.writeAll(o, "</span>");
-                        i = j + 1;
-                        h = true;
-                    }
-                },
-                '&' => {
-                    var db: [8]u8 = undefined;
-                    const dr = decodeEntity(text[i..], &db);
-                    if (dr.len > 0) {
-                        try p.esc(db[0..dr.len], o);
-                        i += dr.consumed;
-                        h = true;
-                    } else {
-                        try p.writeAll(o, "&amp;");
-                        i += 1;
-                        h = true;
-                    }
-                },
-                '>', '"', '\'' => {
-                    try p.writeAll(o, html_escape_map[c].?);
-                    i += 1;
-                    h = true;
-                },
-                else => {},
+            const res = try p.handleInlineSpecial(text, &i, o, depth, plain);
+            if (res.handled) {
+                if (res.emit_char) |ch| try p.writeEscapedByte(o, ch);
+                continue;
             }
-            if (!h) {
-                em = true;
-                ec = text[i];
-                i += 1;
-            }
-            if (em) if (html_escape_map[ec]) |e| try p.writeAll(o, e) else try p.writeByte(o, ec);
+            try p.writeEscapedByte(o, text[i]);
+            i += 1;
         }
     }
     fn parseIndentedCodeBlock(parser: *OctomarkParser, line_content: []const u8, leading_spaces: usize, output: anytype) !bool {
@@ -2204,95 +2230,236 @@ pub const OctomarkParser = struct {
             else => false,
         };
     }
-    fn processSingleLine(p: *OctomarkParser, line: []const u8, full: []const u8, pos: usize, o: anytype) !bool {
-        const s = p.startCall(.processSingleLine);
-        defer p.endCall(.processSingleLine, s);
-        if (try p.processLeafBlockContinuation(line, o)) return false;
-        const id = leadingIndent(line);
-        var ls = id.columns;
-        var lc = line[id.idx..];
-        if (lc.len == 0) {
-            p.prev_line_blank = true;
-            return try p.handleBlankLine(o, null, true);
-        }
-        const prev_blank = p.prev_line_blank;
-        p.prev_line_blank = false;
+    const BlockquoteScan = struct {
+        depth: usize,
+        extra_indent: usize,
+        rest: []const u8,
+    };
+    fn scanBlockquotePrefix(line: []const u8, base_cols: usize) BlockquoteScan {
+        var lc = line;
         var q_lv: usize = 0;
         var ex_id: usize = 0;
-        {
-            var i: usize = 0;
-            var col: usize = ls;
-            while (i < lc.len) {
-                const start_i = i;
-                while (i < lc.len) : (i += 1) switch (lc[i]) {
-                    ' ' => col += 1,
-                    '\t' => col += 4 - (col % 4),
-                    else => break,
+        var i: usize = 0;
+        var col: usize = base_cols;
+        while (i < lc.len) {
+            const start_i = i;
+            while (i < lc.len) : (i += 1) switch (lc[i]) {
+                ' ' => col += 1,
+                '\t' => col += 4 - (col % 4),
+                else => break,
+            };
+            if (col > 3) {
+                i = start_i;
+                break;
+            }
+            if (i < lc.len and lc[i] == '>') {
+                q_lv += 1;
+                i += 1;
+                col += 1;
+                if (i < lc.len) switch (lc[i]) {
+                    ' ' => {
+                        i += 1;
+                        col += 1;
+                    },
+                    '\t' => {
+                        const tw = 4 - (col % 4);
+                        i += 1;
+                        col += tw;
+                        if (tw > 0) ex_id += tw - 1;
+                    },
+                    else => {},
                 };
-                if (col > 3) {
-                    i = start_i;
-                    break;
-                }
-                if (i < lc.len and lc[i] == '>') {
-                    q_lv += 1;
-                    i += 1;
-                    col += 1;
-                    if (i < lc.len) switch (lc[i]) {
-                        ' ' => {
-                            i += 1;
-                            col += 1;
-                        },
-                        '\t' => {
-                            const tw = 4 - (col % 4);
-                            i += 1;
-                            col += tw;
-                            if (tw > 0) ex_id += tw - 1;
-                        },
-                        else => {},
-                    };
-                    lc = lc[i..];
-                    i = 0;
-                    col = 0;
-                } else {
-                    i = start_i;
-                    break;
-                }
+                lc = lc[i..];
+                i = 0;
+                col = 0;
+            } else {
+                i = start_i;
+                break;
             }
         }
-        var cur_q: usize = p.blockquote_depth;
-        if (q_lv > 0) {
-            var remove: usize = 0;
-            if (cur_q > 0) {
-                remove = if (ls > 3) 3 else ls;
-            } else {
-                const list_content_indent: ?usize = if (p.active_list_stack_idx >= 0)
-                    @intCast(p.block_stack[@intCast(p.active_list_stack_idx)].content_indent)
-                else
-                    null;
-                if (list_content_indent) |lci| {
-                    if (ls >= lci) {
-                        const extra = ls - lci;
-                        if (extra > 0) remove = if (extra > 3) 3 else extra;
-                    } else {
-                        remove = if (ls > 3) 3 else ls;
-                    }
+        return .{ .depth = q_lv, .extra_indent = ex_id, .rest = lc };
+    }
+    fn adjustIndentForBlockquote(p: *OctomarkParser, ls: usize, q_lv: usize, cur_q: usize) usize {
+        if (q_lv == 0) return ls;
+        var remove: usize = 0;
+        if (cur_q > 0) {
+            remove = if (ls > 3) 3 else ls;
+        } else {
+            const list_content_indent: ?usize = if (p.active_list_stack_idx >= 0)
+                @intCast(p.block_stack[@intCast(p.active_list_stack_idx)].content_indent)
+            else
+                null;
+            if (list_content_indent) |lci| {
+                if (ls >= lci) {
+                    const extra = ls - lci;
+                    if (extra > 0) remove = if (extra > 3) 3 else extra;
                 } else {
                     remove = if (ls > 3) 3 else ls;
                 }
-            }
-            if (remove > 0) ls -= remove;
-        }
-        ls += ex_id;
-        const p_id = leadingIndent(lc);
-        ls += p_id.columns;
-        lc = lc[p_id.idx..];
-        var lazy = false;
-        if (q_lv < cur_q and p.topT() == .paragraph) {
-            if (!p.isBSM(lc, ls)) {
-                q_lv = cur_q;
-                lazy = true;
+            } else {
+                remove = if (ls > 3) 3 else ls;
             }
         }
+        return if (remove > 0) ls - remove else ls;
+    }
+    fn trySetextHeader(p: *OctomarkParser, lc: []const u8, parse_ls: usize, list_idx: ?usize, lazy: bool, o: anytype) !bool {
+        if (lazy or parse_ls > 3) return false;
+        if (p.topT() != .paragraph and (list_idx == null or p.paragraph_content.items.len == 0)) return false;
+        var st: usize = 0;
+        while (st < lc.len and (lc[st] == ' ' or lc[st] == '\t')) st += 1;
+        var en = lc.len;
+        while (en > st and (lc[en - 1] == ' ' or lc[en - 1] == '\t')) en -= 1;
+        if (st >= en or (lc[st] != '=' and lc[st] != '-')) return false;
+        var i = st;
+        while (i < en) : (i += 1) if (lc[i] != lc[st]) break;
+        if (i != en) return false;
+        const tr = std.mem.trim(u8, p.paragraph_content.items, " \t\n");
+        if (tr.len == 0) return false;
+        p.paragraph_content.clearRetainingCapacity();
+        if (p.topT() == .paragraph) p.pop();
+        const lv: u8 = if (lc[st] == '=') '1' else '2';
+        try p.writeAll(o, "<h");
+        try p.writeByte(o, lv);
+        try p.writeAll(o, ">");
+        try p.parseInlineContent(tr, o);
+        try p.writeAll(o, "</h");
+        try p.writeByte(o, lv);
+        try p.writeAll(o, ">\n");
+        return true;
+    }
+    fn tryOpenBlockquoteFromLine(p: *OctomarkParser, lc: []const u8, ls: usize, o: anytype) !?[]const u8 {
+        var q_lc = lc;
+        var q_ls = ls;
+        if (p.stack_depth > 0) {
+            const l_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
+            if (l_idx) |idx| {
+                const li: usize = @intCast(p.block_stack[idx].content_indent);
+                if (ls >= li) {
+                    q_lc = stripIndentColumns(lc, li);
+                    q_ls = ls - li;
+                }
+            }
+        }
+        if (q_ls <= 3) {
+            var q_c: usize = 0;
+            var l_c = q_lc;
+            while (true) {
+                var k: usize = 0;
+                while (k < l_c.len and (l_c[k] == ' ' or l_c[k] == '\t')) k += 1;
+                if (k < l_c.len and l_c[k] == '>') {
+                    q_c += 1;
+                    k += 1;
+                    if (k < l_c.len and (l_c[k] == ' ' or l_c[k] == '\t')) k += 1;
+                    l_c = l_c[k..];
+                } else break;
+            }
+            if (q_c > 0) {
+                try p.closeP(o);
+                var k: usize = 0;
+                while (k < q_c) : (k += 1) {
+                    try p.writeAll(o, "<blockquote>");
+                    try p.pushBlock(.blockquote, 0);
+                }
+                return l_c;
+            }
+        }
+        return null;
+    }
+    fn tryStartHtmlBlock(p: *OctomarkParser, lc: []const u8, html_ls: usize, o: anytype) !bool {
+        if (lc.len < 3 or html_ls > 3) return false;
+        var h_t: u8 = 0;
+        if (lc.len >= 4 and lc[1] == '!') {
+            if (std.mem.startsWith(u8, lc, "<!--")) h_t = 2 else if (std.mem.startsWith(u8, lc, "<![CDATA[")) h_t = 5 else h_t = 4;
+        } else if (lc.len >= 2 and lc[1] == '?') {
+            h_t = 3;
+        } else {
+            const is_close = lc.len >= 2 and lc[1] == '/';
+            const tr = if (is_close) lc[2..] else lc[1..];
+            const t1 = [_][]const u8{ "script", "pre", "style", "textarea" };
+            if (!is_close) for (t1) |t| if (std.mem.startsWith(u8, tr, t)) {
+                if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
+                    h_t = 1;
+                    break;
+                }
+            };
+            if (h_t == 0) {
+                const t6 = [_][]const u8{
+                    "address",  "article",  "aside",    "base",       "basefont", "blockquote", "body",   "caption",
+                    "center",   "col",      "colgroup", "dd",         "details",  "dialog",     "dir",    "div",
+                    "dl",       "dt",       "fieldset", "figcaption", "figure",   "footer",     "form",   "frame",
+                    "frameset", "h1",       "h2",       "h3",         "h4",       "h5",         "h6",     "head",
+                    "header",   "hr",       "html",     "iframe",     "legend",   "li",         "link",   "main",
+                    "menu",     "menuitem", "nav",      "noframes",   "ol",       "optgroup",   "option", "p",
+                    "param",    "section",  "source",   "summary",    "table",    "tbody",      "td",     "textarea",
+                    "tfoot",    "th",       "thead",    "title",      "tr",       "ul",
+                };
+                for (t6) |t| if (std.mem.startsWith(u8, tr, t)) {
+                    if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
+                        h_t = 6;
+                        break;
+                    }
+                };
+            }
+            if (h_t == 0 and p.topT() != .paragraph) {
+                const l = p.parseHtmlTag(lc);
+                if (l > 0) {
+                    var rem = lc[l..];
+                    while (rem.len > 0 and (rem[0] == ' ' or rem[0] == '\t')) rem = rem[1..];
+                    if (rem.len == 0) h_t = 7;
+                }
+            }
+        }
+        if (h_t == 0) return false;
+        try p.tryCloseLeaf(o);
+        try p.pushBlockExtra(.html_block, 0, h_t);
+        var pad: usize = 0;
+        while (pad < html_ls) : (pad += 1) try p.writeByte(o, ' ');
+        try p.writeAll(o, lc);
+        try p.writeByte(o, '\n');
+        var term = false;
+        if (h_t == 1) {
+            const tags = [_][]const u8{ "</script>", "</pre>", "</style>", "</textarea>" };
+            var i: usize = 0;
+            while (i < lc.len) : (i += 1) {
+                if (lc[i] == '<' and i + 1 < lc.len and lc[i + 1] == '/') {
+                    for (tags) |tag| {
+                        if (i + tag.len <= lc.len) {
+                            if (std.ascii.eqlIgnoreCase(lc[i .. i + tag.len], tag)) {
+                                term = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (term) break;
+            }
+        } else if (h_t == 2) {
+            if (std.mem.indexOf(u8, lc, "-->") != null) term = true;
+        } else if (h_t == 3) {
+            if (std.mem.indexOf(u8, lc, "?>") != null) term = true;
+        } else if (h_t == 4) {
+            if (std.mem.indexOf(u8, lc, ">") != null) term = true;
+        } else if (h_t == 5) {
+            if (std.mem.indexOf(u8, lc, "]]>") != null) term = true;
+        }
+        if (term) try p.renderTop(o);
+        return true;
+    }
+    const ListParseResult = struct {
+        is_dl: bool,
+        is_list: bool,
+    };
+    const ListContext = struct {
+        idx: ?usize,
+        content_indent: usize,
+        indent: usize,
+        lazy: bool,
+        parse_ls: usize,
+        html_ls: usize,
+        force_close_empty: bool,
+    };
+    fn syncBlockquoteDepth(p: *OctomarkParser, q_lv: usize, o: anytype) !void {
+        var cur_q: usize = p.blockquote_depth;
         while (cur_q > q_lv) {
             const t = p.topT().?;
             try p.renderTop(o);
@@ -2309,48 +2476,52 @@ pub const OctomarkParser = struct {
             try p.pushBlock(.blockquote, 0);
             cur_q += 1;
         }
-        if (lc.len == 0) {
-            p.prev_line_blank = true;
-            var bq_idx: ?usize = null;
-            if (p.stack_depth > 0) {
-                var i = p.stack_depth;
-                while (i > 0) {
-                    i -= 1;
-                    const bt = p.block_stack[i].block_type;
-                    if (bq_idx == null and bt == .blockquote) bq_idx = i;
-                }
-            }
-            return try p.handleBlankLine(o, bq_idx, false);
+    }
+    fn findFirstBlockquoteIndex(p: *OctomarkParser) ?usize {
+        if (p.stack_depth == 0) return null;
+        var i = p.stack_depth;
+        while (i > 0) {
+            i -= 1;
+            const bt = p.block_stack[i].block_type;
+            if (bt == .blockquote) return i;
         }
-        const is_dl = try p.parseDefinitionList(&lc, &ls, o);
-        var is_list = try p.parseListItem(&lc, &ls, o);
-        if ((is_dl or is_list) and lc.len > 0) {
-            const ex = leadingIndent(lc);
+        return null;
+    }
+    fn handleBlankLineAfterPrefixes(p: *OctomarkParser, o: anytype) !bool {
+        p.prev_line_blank = true;
+        const bq_idx = p.findFirstBlockquoteIndex();
+        return try p.handleBlankLine(o, bq_idx, false);
+    }
+    fn parseDefinitionAndList(p: *OctomarkParser, lc: *[]const u8, ls: *usize, o: anytype) !ListParseResult {
+        const is_dl = try p.parseDefinitionList(lc, ls, o);
+        var is_list = try p.parseListItem(lc, ls, o);
+        if ((is_dl or is_list) and lc.*.len > 0) {
+            const ex = leadingIndent(lc.*);
             if (ex.idx > 0) {
-                ls += ex.columns;
-                lc = lc[ex.idx..];
+                ls.* += ex.columns;
+                lc.* = lc.*[ex.idx..];
             }
         }
-        if (is_list and lc.len > 0) {
+        if (is_list and lc.*.len > 0) {
             var nest_attempts: usize = 0;
-            while (nest_attempts < 2 and lc.len > 0) : (nest_attempts += 1) {
+            while (nest_attempts < 2 and lc.*.len > 0) : (nest_attempts += 1) {
                 const list_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
                 var list_content_indent: usize = 0;
                 if (list_idx) |idx| {
                     list_content_indent = @intCast(p.block_stack[idx].content_indent);
                 }
-                if (list_idx != null and ls >= list_content_indent) {
-                    var lc2 = lc;
-                    var ls2 = ls;
+                if (list_idx != null and ls.* >= list_content_indent) {
+                    var lc2 = lc.*;
+                    var ls2 = ls.*;
                     if (try p.parseListItem(&lc2, &ls2, o)) {
-                        lc = lc2;
-                        ls = ls2;
+                        lc.* = lc2;
+                        ls.* = ls2;
                         is_list = true;
-                        if (lc.len > 0) {
-                            const ex2 = leadingIndent(lc);
+                        if (lc.*.len > 0) {
+                            const ex2 = leadingIndent(lc.*);
                             if (ex2.idx > 0) {
-                                ls += ex2.columns;
-                                lc = lc[ex2.idx..];
+                                ls.* += ex2.columns;
+                                lc.* = lc.*[ex2.idx..];
                             }
                         }
                         continue;
@@ -2359,6 +2530,17 @@ pub const OctomarkParser = struct {
                 break;
             }
         }
+        return .{ .is_dl = is_dl, .is_list = is_list };
+    }
+    fn buildListContext(
+        p: *OctomarkParser,
+        lc: []const u8,
+        ls: usize,
+        is_list: bool,
+        is_dl: bool,
+        lazy: bool,
+        prev_blank: bool,
+    ) ListContext {
         const list_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
         var list_content_indent: usize = 0;
         var list_indent: usize = 0;
@@ -2391,210 +2573,135 @@ pub const OctomarkParser = struct {
         if (list_idx != null and ls >= list_content_indent) html_ls = ls - list_content_indent;
         const force_close_empty = prev_blank and list_idx != null and !is_list and !is_dl and
             p.block_stack[list_idx.?].pending_empty_item;
-        if (lc.len > 0) {
-            var mi: usize = 0;
-            while (mi < p.stack_depth) {
-                const e = p.block_stack[mi];
-                if (e.block_type == .unordered_list or e.block_type == .ordered_list) {
-                    if (force_close_empty and list_idx.? == mi) {
-                        while (p.stack_depth > mi) try p.renderTop(o);
-                        break;
-                    }
-                    if (ls < @as(usize, @intCast(e.content_indent)) and !lazy and !is_list and !is_dl and !list_lazy) {
-                        if (p.pending_loose_idx) |idx| {
-                            if (idx == mi) {
-                                var outer: ?usize = null;
-                                var j: usize = mi;
-                                while (j > 0) {
-                                    j -= 1;
-                                    const bt = p.block_stack[j].block_type;
-                                    if (bt == .unordered_list or bt == .ordered_list) {
-                                        outer = j;
-                                        break;
-                                    }
+        return .{
+            .idx = list_idx,
+            .content_indent = list_content_indent,
+            .indent = list_indent,
+            .lazy = list_lazy,
+            .parse_ls = parse_ls,
+            .html_ls = html_ls,
+            .force_close_empty = force_close_empty,
+        };
+    }
+    fn adjustListStackForLine(
+        p: *OctomarkParser,
+        ls: usize,
+        ctx: ListContext,
+        is_list: bool,
+        is_dl: bool,
+        lazy: bool,
+        o: anytype,
+    ) !void {
+        if (p.stack_depth == 0) return;
+        var mi: usize = 0;
+        while (mi < p.stack_depth) {
+            const e = p.block_stack[mi];
+            if (e.block_type == .unordered_list or e.block_type == .ordered_list) {
+                if (ctx.force_close_empty and ctx.idx.? == mi) {
+                    while (p.stack_depth > mi) try p.renderTop(o);
+                    break;
+                }
+                if (ls < @as(usize, @intCast(e.content_indent)) and !lazy and !is_list and !is_dl and !ctx.lazy) {
+                    if (p.pending_loose_idx) |idx| {
+                        if (idx == mi) {
+                            var outer: ?usize = null;
+                            var j: usize = mi;
+                            while (j > 0) {
+                                j -= 1;
+                                const bt = p.block_stack[j].block_type;
+                                if (bt == .unordered_list or bt == .ordered_list) {
+                                    outer = j;
+                                    break;
                                 }
-                                p.pending_loose_idx = outer;
                             }
-                        }
-                        while (p.stack_depth > mi) try p.renderTop(o);
-                        break;
-                    }
-                }
-                mi += 1;
-            }
-            if (p.pending_loose_idx) |idx| {
-                if (idx < p.stack_depth) {
-                    const entry = p.block_stack[idx];
-                    const entry_content: usize = @intCast(entry.content_indent);
-                    if (is_list or ls >= entry_content) {
-                        try p.applyPendingLoose(o);
-                    }
-                } else {
-                    p.pending_loose_idx = null;
-                }
-            }
-            if (ls <= 3 and isThematicBreakLine(lc)) {
-                if (p.stack_depth > 0) {
-                    const l_id: ?i32 = if (p.active_list_stack_idx >= 0) p.block_stack[@intCast(p.active_list_stack_idx)].content_indent else null;
-                    if (l_id) |lim| {
-                        if (ls < @as(usize, @intCast(lim))) {
-                            try p.closeP(o);
-                            while (p.topT() == .unordered_list or p.topT() == .ordered_list) {
-                                try p.renderTop(o);
-                            }
+                            p.pending_loose_idx = outer;
                         }
                     }
+                    while (p.stack_depth > mi) try p.renderTop(o);
+                    break;
                 }
             }
-            if (!lazy and parse_ls <= 3 and (p.topT() == .paragraph or (list_idx != null and
-                p.paragraph_content.items.len > 0)))
-            {
-                var st: usize = 0;
-                while (st < lc.len and (lc[st] == ' ' or lc[st] == '\t')) st += 1;
-                var en = lc.len;
-                while (en > st and (lc[en - 1] == ' ' or lc[en - 1] == '\t')) en -= 1;
-                if (st < en and (lc[st] == '=' or lc[st] == '-')) {
-                    var i = st;
-                    while (i < en) : (i += 1) if (lc[i] != lc[st]) break;
-                    if (i == en) {
-                        const tr = std.mem.trim(u8, p.paragraph_content.items, " \t\n");
-                        if (tr.len > 0) {
-                            p.paragraph_content.clearRetainingCapacity();
-                            if (p.topT() == .paragraph) p.pop();
-                            const lv: u8 = if (lc[st] == '=') '1' else '2';
-                            try p.writeAll(o, "<h");
-                            try p.writeByte(o, lv);
-                            try p.writeAll(o, ">");
-                            try p.parseInlineContent(tr, o);
-                            try p.writeAll(o, "</h");
-                            try p.writeByte(o, lv);
-                            try p.writeAll(o, ">\n");
-                            return false;
-                        }
-                    }
+            mi += 1;
+        }
+        if (p.pending_loose_idx) |idx| {
+            if (idx < p.stack_depth) {
+                const entry = p.block_stack[idx];
+                const entry_content: usize = @intCast(entry.content_indent);
+                if (is_list or ls >= entry_content) {
+                    try p.applyPendingLoose(o);
+                }
+            } else {
+                p.pending_loose_idx = null;
+            }
+        }
+    }
+    fn handleThematicBreakListClose(p: *OctomarkParser, lc: []const u8, ls: usize, o: anytype) !void {
+        if (ls > 3 or !isThematicBreakLine(lc) or p.stack_depth == 0) return;
+        const l_id: ?i32 = if (p.active_list_stack_idx >= 0) p.block_stack[@intCast(p.active_list_stack_idx)].content_indent else null;
+        if (l_id) |lim| {
+            if (ls < @as(usize, @intCast(lim))) {
+                try p.closeP(o);
+                while (p.topT() == .unordered_list or p.topT() == .ordered_list) {
+                    try p.renderTop(o);
                 }
             }
+        }
+    }
+    fn processSingleLine(p: *OctomarkParser, line: []const u8, full: []const u8, pos: usize, o: anytype) !bool {
+        const s = p.startCall(.processSingleLine);
+        defer p.endCall(.processSingleLine, s);
+        if (try p.processLeafBlockContinuation(line, o)) return false;
+        const id = leadingIndent(line);
+        var ls = id.columns;
+        var lc = line[id.idx..];
+        if (lc.len == 0) {
+            p.prev_line_blank = true;
+            return try p.handleBlankLine(o, null, true);
+        }
+        const prev_blank = p.prev_line_blank;
+        p.prev_line_blank = false;
+        const bq_scan = scanBlockquotePrefix(lc, ls);
+        var q_lv: usize = bq_scan.depth;
+        const ex_id: usize = bq_scan.extra_indent;
+        lc = bq_scan.rest;
+        const cur_q: usize = p.blockquote_depth;
+        ls = adjustIndentForBlockquote(p, ls, q_lv, cur_q);
+        ls += ex_id;
+        const p_id = leadingIndent(lc);
+        ls += p_id.columns;
+        lc = lc[p_id.idx..];
+        var lazy = false;
+        if (q_lv < cur_q and p.topT() == .paragraph) {
+            if (!p.isBSM(lc, ls)) {
+                q_lv = cur_q;
+                lazy = true;
+            }
+        }
+        try p.syncBlockquoteDepth(q_lv, o);
+        if (lc.len == 0) {
+            return try p.handleBlankLineAfterPrefixes(o);
+        }
+        const list_result = try p.parseDefinitionAndList(&lc, &ls, o);
+        const is_dl = list_result.is_dl;
+        const is_list = list_result.is_list;
+        const list_ctx = p.buildListContext(lc, ls, is_list, is_dl, lazy, prev_blank);
+        const list_idx = list_ctx.idx;
+        const parse_ls = list_ctx.parse_ls;
+        const html_ls = list_ctx.html_ls;
+        if (lc.len > 0) {
+            try p.adjustListStackForLine(ls, list_ctx, is_list, is_dl, lazy, o);
+            try p.handleThematicBreakListClose(lc, ls, o);
+            if (try p.trySetextHeader(lc, parse_ls, list_idx, lazy, o)) return false;
             switch (lc[0]) {
                 '#' => if (try p.parseHeader(lc, parse_ls, o)) return false,
                 '`', '~' => if (try p.parseFencedCodeBlock(lc, parse_ls, o)) return false,
                 '$' => if (try p.parseMathBlock(lc, parse_ls, o)) return false,
                 '-', '*', '_' => if (try p.parseHorizontalRule(lc, parse_ls, o)) return false,
                 '|' => if (try p.parseTable(lc, full, pos, o)) return true,
-                '>' => {
-                    var q_lc = lc;
-                    var q_ls = ls;
-                    if (p.stack_depth > 0) {
-                        const l_idx: ?usize = if (p.active_list_stack_idx >= 0) @intCast(p.active_list_stack_idx) else null;
-                        if (l_idx) |idx| {
-                            const li: usize = @intCast(p.block_stack[idx].content_indent);
-                            if (ls >= li) {
-                                q_lc = stripIndentColumns(lc, li);
-                                q_ls = ls - li;
-                            }
-                        }
-                    }
-                    if (q_ls <= 3) {
-                        var q_c: usize = 0;
-                        var l_c = q_lc;
-                        while (true) {
-                            var k: usize = 0;
-                            while (k < l_c.len and (l_c[k] == ' ' or l_c[k] == '\t')) k += 1;
-                            if (k < l_c.len and l_c[k] == '>') {
-                                q_c += 1;
-                                k += 1;
-                                if (k < l_c.len and (l_c[k] == ' ' or l_c[k] == '\t')) k += 1;
-                                l_c = l_c[k..];
-                            } else break;
-                        }
-                        if (q_c > 0) {
-                            lc = l_c;
-                            try p.closeP(o);
-                            var k: usize = 0;
-                            while (k < q_c) : (k += 1) {
-                                try p.writeAll(o, "<blockquote>");
-                                try p.pushBlock(.blockquote, 0);
-                            }
-                        }
-                    }
+                '>' => if (try p.tryOpenBlockquoteFromLine(lc, ls, o)) |new_lc| {
+                    lc = new_lc;
                 },
-                '<' => if (lc.len >= 3 and html_ls <= 3) {
-                    var h_t: u8 = 0;
-                    if (lc.len >= 4 and lc[1] == '!') {
-                        if (std.mem.startsWith(u8, lc, "<!--")) h_t = 2 else if (std.mem.startsWith(u8, lc, "<![CDATA[")) h_t = 5 else h_t = 4;
-                    } else if (lc.len >= 2 and lc[1] == '?') h_t = 3 else {
-                        const is_close = lc.len >= 2 and lc[1] == '/';
-                        const tr = if (is_close) lc[2..] else lc[1..];
-                        const t1 = [_][]const u8{ "script", "pre", "style", "textarea" };
-                        if (!is_close) for (t1) |t| if (std.mem.startsWith(u8, tr, t)) {
-                            if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
-                                h_t = 1;
-                                break;
-                            }
-                        };
-                        if (h_t == 0) {
-                            const t6 = [_][]const u8{
-                                "address",  "article",  "aside",    "base",       "basefont", "blockquote", "body",   "caption",
-                                "center",   "col",      "colgroup", "dd",         "details",  "dialog",     "dir",    "div",
-                                "dl",       "dt",       "fieldset", "figcaption", "figure",   "footer",     "form",   "frame",
-                                "frameset", "h1",       "h2",       "h3",         "h4",       "h5",         "h6",     "head",
-                                "header",   "hr",       "html",     "iframe",     "legend",   "li",         "link",   "main",
-                                "menu",     "menuitem", "nav",      "noframes",   "ol",       "optgroup",   "option", "p",
-                                "param",    "section",  "source",   "summary",    "table",    "tbody",      "td",     "textarea",
-                                "tfoot",    "th",       "thead",    "title",      "tr",       "ul",
-                            };
-                            for (t6) |t| if (std.mem.startsWith(u8, tr, t)) {
-                                if (tr.len == t.len or !std.ascii.isAlphanumeric(tr[t.len])) {
-                                    h_t = 6;
-                                    break;
-                                }
-                            };
-                        }
-                        if (h_t == 0 and p.topT() != .paragraph) {
-                            const l = p.parseHtmlTag(lc);
-                            if (l > 0) {
-                                var rem = lc[l..];
-                                while (rem.len > 0 and (rem[0] == ' ' or rem[0] == '\t')) rem = rem[1..];
-                                if (rem.len == 0) h_t = 7;
-                            }
-                        }
-                    }
-                    if (h_t > 0) {
-                        try p.tryCloseLeaf(o);
-                        try p.pushBlockExtra(.html_block, 0, h_t);
-                        var pad: usize = 0;
-                        while (pad < html_ls) : (pad += 1) try p.writeByte(o, ' ');
-                        try p.writeAll(o, lc);
-                        try p.writeByte(o, '\n');
-                        var term = false;
-                        if (h_t == 1) {
-                            const tags = [_][]const u8{ "</script>", "</pre>", "</style>", "</textarea>" };
-                            var i: usize = 0;
-                            while (i < lc.len) : (i += 1) {
-                                if (lc[i] == '<' and i + 1 < lc.len and lc[i + 1] == '/') {
-                                    for (tags) |tag| {
-                                        if (i + tag.len <= lc.len) {
-                                            if (std.ascii.eqlIgnoreCase(lc[i .. i + tag.len], tag)) {
-                                                term = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                if (term) break;
-                            }
-                        } else if (h_t == 2) {
-                            if (std.mem.indexOf(u8, lc, "-->") != null) term = true;
-                        } else if (h_t == 3) {
-                            if (std.mem.indexOf(u8, lc, "?>") != null) term = true;
-                        } else if (h_t == 4) {
-                            if (std.mem.indexOf(u8, lc, ">") != null) term = true;
-                        } else if (h_t == 5) {
-                            if (std.mem.indexOf(u8, lc, "]]>") != null) term = true;
-                        }
-                        if (term) try p.renderTop(o);
-                        return false;
-                    }
-                },
+                '<' => if (try p.tryStartHtmlBlock(lc, html_ls, o)) return false,
                 else => {},
             }
         }
